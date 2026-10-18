@@ -1,0 +1,13 @@
+{
+  "appId": "com.kindlewebpagemaker.app",
+  "appName": "KindleWebpageMaker",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}

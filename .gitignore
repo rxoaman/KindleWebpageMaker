@@ -1,0 +1,19 @@
+node_modules/
+dist/
+build/
+.env
+*.epub
+*.log
+.DS_Store
+Thumbs.db
+
+# Android build outputs & caches
+.gradle/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/app/*.iml
+*.apk
