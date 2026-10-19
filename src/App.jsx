@@ -3,6 +3,7 @@ import { Capacitor } from '@capacitor/core'
 import { generateEpubBlob } from './epubGenerator'
 import { parsePdfClient } from './clientPdfExtractor'
 import { crawlAndExtractGfgClient } from './clientGfgCrawler'
+import { saveAndDeliverEpub } from './fileDownloader'
 
 // ── Status badge colours ────────────────────────────────────────────────────
 const STATUS_LABELS = {
@@ -35,37 +36,17 @@ function ProgressBar({ value, max }) {
   )
 }
 
-function triggerDownload(blobOrUrl, filename) {
-  if (typeof blobOrUrl === 'string') {
-    const a = document.createElement('a')
-    a.href = blobOrUrl
-    a.download = filename || 'download.epub'
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    return
-  }
-
-  const url = URL.createObjectURL(blobOrUrl)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename || 'book.epub'
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  setTimeout(() => URL.revokeObjectURL(url), 10000)
-}
-
 const EXAMPLES = [
-  'https://www.geeksforgeeks.org/system-design/getting-started-with-system-design/',
-  'https://www.geeksforgeeks.org/dsa/dsa-tutorial-learn-data-structures-and-algorithms/',
-  'https://www.geeksforgeeks.org/data-structures/introduction-to-data-structures/',
+  { label: 'GFG System Design', url: 'https://www.geeksforgeeks.org/system-design/getting-started-with-system-design/' },
+  { label: 'GFG DSA Tutorial', url: 'https://www.geeksforgeeks.org/dsa/dsa-tutorial-learn-data-structures-and-algorithms/' },
+  { label: 'Wikipedia System Design', url: 'https://en.wikipedia.org/wiki/Systems_design' },
 ]
 
 export default function App() {
   const isNative = Capacitor.isNativePlatform()
 
-  const [mode, setMode] = useState('gfg') // 'gfg' | 'pdf'
+  const [mode, setMode] = useState('web') // 'web' | 'pdf'
+  const [crawlScope, setCrawlScope] = useState('crawl') // 'crawl' (up to 200) | 'single'
   const [engineMode, setEngineMode] = useState(isNative ? 'native' : 'auto') // 'native' | 'server' | 'auto'
   const [serverUrl, setServerUrl] = useState('')
   const [showSettings, setShowSettings] = useState(false)
@@ -79,8 +60,10 @@ export default function App() {
   const fileInputRef = useRef(null)
 
   const [jobId, setJobId] = useState(null)
+  const [downloadBlob, setDownloadBlob] = useState(null)
   const [downloadUrl, setDownloadUrl] = useState(null)
   const [downloadFilename, setDownloadFilename] = useState(null)
+  const [downloadStatusMsg, setDownloadStatusMsg] = useState('')
   const [progress, setProgress] = useState(null)
   const [status, setStatus] = useState(null)
   const [error, setError] = useState(null)
@@ -93,8 +76,10 @@ export default function App() {
       eventSourceRef.current = null
     }
     setJobId(null)
+    setDownloadBlob(null)
     setDownloadUrl(null)
     setDownloadFilename(null)
+    setDownloadStatusMsg('')
     setProgress(null)
     setStatus(null)
     setError(null)
@@ -121,6 +106,10 @@ export default function App() {
         if (data.filename) setDownloadFilename(data.filename)
         setLoading(false)
         es.close()
+        // Automatically deliver EPUB
+        saveAndDeliverEpub(dl, data.filename).then((res) => {
+          if (res.message) setDownloadStatusMsg(res.message)
+        })
       } else if (data.type === 'error') {
         setError(data.message)
         setStatus('error')
@@ -136,8 +125,8 @@ export default function App() {
     }
   }, [])
 
-  // ── Handle GFG Submit ─────────────────────────────────────────────────────
-  const handleGfgSubmit = useCallback(
+  // ── Handle Web / GFG Submit ────────────────────────────────────────────────
+  const handleWebSubmit = useCallback(
     async (e) => {
       e.preventDefault()
       reset()
@@ -149,41 +138,56 @@ export default function App() {
       setError(null)
       setStatus('crawling')
 
-      // Use In-App Native Engine if in APK or forced native
-      if (engineMode === 'native' || isNative) {
+      const isSingle = crawlScope === 'single'
+
+      // Execution engine routing:
+      // On native Android APK: use in-app engine (backed by Android OkHttp, bypasses browser CORS)
+      // On PC/Web browser: use backend server (/api/crawl) which fetches via Node.js axios without CORS
+      const useInApp = isNative ? engineMode !== 'server' : engineMode === 'native'
+
+      if (useInApp) {
         try {
-          const { sectionName, chapters } = await crawlAndExtractGfgClient(trimmed, ({ status, found, processed, total }) => {
-            setStatus(status)
-            setProgress({ found, processed, total })
-          })
+          const { sectionName, chapters } = await crawlAndExtractGfgClient(
+            trimmed,
+            { singlePage: isSingle },
+            ({ status, found, processed, total }) => {
+              setStatus(status)
+              setProgress({ found, processed, total })
+            }
+          )
 
           setStatus('building')
           setProgress({ found: chapters.length, processed: chapters.length, total: chapters.length })
 
-          const safeName = (sectionName || 'GeeksForGeeks').replace(/\s+/g, '-')
-          const finalFilename = `${safeName}-GeeksForGeeks.epub`
+          const isGfg = trimmed.includes('geeksforgeeks.org')
+          const safeName = (sectionName || (isGfg ? 'GeeksForGeeks' : 'Webpage')).replace(/[/\\?%*:|"<>]/g, '').trim().replace(/\s+/g, '-')
+          const finalFilename = isGfg ? `${safeName}-GeeksForGeeks.epub` : `${safeName}.epub`
 
           const blob = await generateEpubBlob({
-            title: `${sectionName} - GeeksForGeeks`,
-            author: 'GeeksForGeeks',
+            title: isGfg ? `${sectionName} - GeeksForGeeks` : sectionName,
+            author: isGfg ? 'GeeksForGeeks' : new URL(trimmed).hostname,
             chapters,
           })
 
           const blobUrl = URL.createObjectURL(blob)
+          setDownloadBlob(blob)
           setDownloadUrl(blobUrl)
           setDownloadFilename(finalFilename)
           setStatus('done')
           setLoading(false)
-          triggerDownload(blob, finalFilename)
+
+          const deliverRes = await saveAndDeliverEpub(blob, finalFilename)
+          if (deliverRes.message) setDownloadStatusMsg(deliverRes.message)
         } catch (err) {
-          setError(err.message || 'Failed to crawl GFG section.')
+          console.error('[App] Crawl & Extract error:', err)
+          setError(err.message || 'Failed to crawl and extract webpage content.')
           setStatus('error')
           setLoading(false)
         }
         return
       }
 
-      // Otherwise, use backend server
+      // Backend route (PC browser default or when explicitly selected)
       const apiBase = serverUrl.trim()
       const crawlEndpoint = apiBase ? `${apiBase.replace(/\/$/, '')}/api/crawl` : '/api/crawl'
 
@@ -191,7 +195,7 @@ export default function App() {
         const res = await fetch(crawlEndpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: trimmed }),
+          body: JSON.stringify({ url: trimmed, singlePage: isSingle }),
         })
         const data = await res.json()
 
@@ -202,41 +206,13 @@ export default function App() {
         setJobId(data.jobId)
         startSSE(data.jobId, apiBase)
       } catch (err) {
-        // Fallback to client-side engine if server is unreachable
-        if (err.message?.includes('fetch') || err.message?.includes('Failed')) {
-          console.warn('Backend server unreachable, falling back to in-app engine...')
-          try {
-            const { sectionName, chapters } = await crawlAndExtractGfgClient(trimmed, ({ status, found, processed, total }) => {
-              setStatus(status)
-              setProgress({ found, processed, total })
-            })
-            setStatus('building')
-            const finalFilename = `${sectionName.replace(/\s+/g, '-')}-GeeksForGeeks.epub`
-            const blob = await generateEpubBlob({
-              title: `${sectionName} - GeeksForGeeks`,
-              author: 'GeeksForGeeks',
-              chapters,
-            })
-            const blobUrl = URL.createObjectURL(blob)
-            setDownloadUrl(blobUrl)
-            setDownloadFilename(finalFilename)
-            setStatus('done')
-            setLoading(false)
-            triggerDownload(blob, finalFilename)
-            return
-          } catch (innerErr) {
-            setError(innerErr.message)
-            setStatus('error')
-            setLoading(false)
-            return
-          }
-        }
-        setError(err.message)
+        console.error('[App] Backend request failed:', err)
+        setError(err.message || 'Failed to connect to backend server. Make sure the backend is running on port 3001.')
         setStatus('error')
         setLoading(false)
       }
     },
-    [url, reset, startSSE, engineMode, isNative, serverUrl]
+    [url, crawlScope, reset, startSSE, engineMode, isNative, serverUrl]
   )
 
   // ── Handle PDF Submit ─────────────────────────────────────────────────────
@@ -254,7 +230,7 @@ export default function App() {
       setError(null)
       setStatus('extracting')
 
-      // If PDF file is uploaded, we can process it directly in-app!
+      // Process PDF directly in-app
       if (pdfFile && (engineMode === 'native' || isNative || !serverUrl)) {
         try {
           const arrayBuffer = await pdfFile.arrayBuffer()
@@ -279,16 +255,19 @@ export default function App() {
           })
 
           const blobUrl = URL.createObjectURL(blob)
+          setDownloadBlob(blob)
           setDownloadUrl(blobUrl)
           setDownloadFilename(finalFilename)
           setStatus('done')
           setLoading(false)
-          triggerDownload(blob, finalFilename)
+
+          const deliverRes = await saveAndDeliverEpub(blob, finalFilename)
+          if (deliverRes.message) setDownloadStatusMsg(deliverRes.message)
           return
         } catch (clientErr) {
           console.warn('In-app PDF parse failed, trying server...', clientErr)
           if (!serverUrl && !isNative) {
-            // Let's try server
+            // pass
           } else {
             setError(clientErr.message || 'Failed to process PDF.')
             setStatus('error')
@@ -346,88 +325,93 @@ export default function App() {
   const handleDrop = (e) => {
     e.preventDefault()
     setIsDragging(false)
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+    if (e.dataTransfer.files?.[0]) {
       const file = e.dataTransfer.files[0]
       if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
         setPdfFile(file)
         if (!pdfTitle) setPdfTitle(file.name.replace(/\.pdf$/i, ''))
       } else {
-        setError('Please drop a valid PDF file (.pdf)')
+        setError('Please drop a valid .pdf file.')
       }
     }
   }
 
   const progressPct =
-    progress && progress.total > 0
-      ? Math.round((progress.processed / progress.total) * 100)
+    progress && (progress.total || progress.found)
+      ? Math.min(100, Math.round((progress.processed / (progress.total || progress.found || 1)) * 100))
       : 0
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white flex flex-col">
+    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans select-none">
       {/* Header */}
-      <header className="border-b border-slate-700 px-4 sm:px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <span className="text-3xl">📚</span>
-          <div>
-            <h1 className="text-lg sm:text-xl font-bold tracking-tight flex items-center gap-2">
-              KindleWebpageMaker
-              {isNative ? (
-                <span className="text-xs font-semibold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
-                  <span>🤖</span> Android App
+      <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-10 px-4 py-3.5">
+        <div className="max-w-2xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <span className="text-2xl">📚</span>
+            <div>
+              <h1 className="text-base sm:text-lg font-bold leading-tight flex items-center gap-2">
+                KindleWebpageMaker
+                <span className="text-[10px] bg-green-500/20 text-green-400 border border-green-500/30 px-1.5 py-0.5 rounded font-mono">
+                  {isNative ? 'Android APK' : 'Web/PC'}
                 </span>
-              ) : (
-                <span className="text-xs font-semibold px-2 py-0.5 rounded bg-green-500/20 text-green-400 border border-green-500/30">
-                  Web & APK Ready
-                </span>
-              )}
-            </h1>
-            <p className="text-slate-400 text-xs sm:text-sm">
-              Convert GeeksForGeeks or PDF documents into Kindle-ready EPUB ebooks
-            </p>
+              </h1>
+              <p className="text-slate-400 text-xs hidden sm:block">
+                Convert GeeksForGeeks, Webpages & PDFs to Kindle EPUBs
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowSettings(!showSettings)}
+              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm border border-slate-700 transition"
+              title="Settings"
+            >
+              ⚙️
+            </button>
           </div>
         </div>
-
-        <button
-          type="button"
-          onClick={() => setShowSettings(!showSettings)}
-          className="p-2 text-slate-400 hover:text-slate-200 rounded-lg hover:bg-slate-800 transition-colors"
-          title="App Settings"
-        >
-          ⚙️
-        </button>
       </header>
 
-      {/* Settings Panel */}
+      {/* Settings Modal */}
       {showSettings && (
-        <div className="bg-slate-800/95 border-b border-slate-700 px-4 sm:px-6 py-3">
-          <div className="max-w-2xl mx-auto flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center text-xs">
+        <div className="bg-slate-850 border-b border-slate-700 p-4 max-w-2xl mx-auto w-full text-xs animate-in slide-in-from-top duration-200">
+          <div className="flex justify-between items-center mb-3">
+            <span className="font-bold text-slate-200 uppercase tracking-wide">Engine Settings</span>
+            <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-white">✕</button>
+          </div>
+          <div className="space-y-3">
             <div>
               <span className="font-semibold text-slate-300 block mb-1">Execution Engine:</span>
               <div className="flex gap-2">
                 <button
                   type="button"
                   onClick={() => setEngineMode('native')}
-                  className={`px-3 py-1 rounded font-medium ${
-                    engineMode === 'native' ? 'bg-green-600 text-white' : 'bg-slate-700 text-slate-300'
+                  className={`px-3 py-1.5 rounded border text-xs ${
+                    engineMode === 'native'
+                      ? 'bg-green-600 border-green-500 text-white font-medium'
+                      : 'bg-slate-800 border-slate-700 text-slate-400'
                   }`}
                 >
-                  In-App Native (Offline)
+                  ⚡ 100% In-App (No Server)
                 </button>
                 <button
                   type="button"
                   onClick={() => setEngineMode('server')}
-                  className={`px-3 py-1 rounded font-medium ${
-                    engineMode === 'server' ? 'bg-green-600 text-white' : 'bg-slate-700 text-slate-300'
+                  className={`px-3 py-1.5 rounded border text-xs ${
+                    engineMode === 'server'
+                      ? 'bg-green-600 border-green-500 text-white font-medium'
+                      : 'bg-slate-800 border-slate-700 text-slate-400'
                   }`}
                 >
-                  Remote / PC Backend
+                  🖥️ Connect to PC Server
                 </button>
               </div>
             </div>
 
             {engineMode === 'server' && (
-              <div className="w-full sm:w-auto flex-1 sm:max-w-xs">
-                <span className="font-semibold text-slate-300 block mb-1">Server URL:</span>
+              <div>
+                <span className="font-semibold text-slate-300 block mb-1">PC Server URL:</span>
                 <input
                   type="text"
                   value={serverUrl}
@@ -441,7 +425,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Main */}
+      {/* Main Content */}
       <main className="flex-1 flex items-start justify-center px-4 py-6 sm:py-10">
         <div className="w-full max-w-2xl space-y-6">
 
@@ -449,15 +433,15 @@ export default function App() {
           <div className="flex bg-slate-800/80 p-1.5 rounded-xl border border-slate-700 shadow-lg">
             <button
               type="button"
-              onClick={() => { reset(); setMode('gfg'); }}
+              onClick={() => { reset(); setMode('web'); }}
               disabled={loading}
               className={`flex-1 py-2.5 px-3 sm:px-4 rounded-lg font-medium text-xs sm:text-sm transition-all flex items-center justify-center gap-1.5 ${
-                mode === 'gfg'
+                mode === 'web'
                   ? 'bg-green-600 text-white shadow-md'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <span>🌐</span> GeeksForGeeks
+              <span>🌐</span> Web & GFG
             </button>
             <button
               type="button"
@@ -475,25 +459,52 @@ export default function App() {
 
           {/* Main Card */}
           <div className="bg-slate-800 rounded-2xl shadow-2xl p-6 sm:p-8 border border-slate-700">
-            {mode === 'gfg' ? (
+            {mode === 'web' ? (
               <>
                 <div className="mb-5">
                   <h2 className="text-base sm:text-lg font-semibold mb-1 flex items-center gap-2">
-                    <span>🌐</span> Convert GFG Section to EPUB
+                    <span>🌐</span> Convert Webpages & GFG to EPUB
                   </h2>
                   <p className="text-slate-400 text-xs sm:text-sm">
-                    Enter any GeeksForGeeks article URL in a topic section. The app will crawl all sub-pages,
-                    clean the content, and bundle it into an EPUB for your Kindle.
+                    Enter any GeeksForGeeks topic URL or ANY website article (Wikipedia, technical blogs, documentation).
+                    We extract clean text, code, and diagrams into a Kindle-ready ebook.
                   </p>
                 </div>
 
-                <form onSubmit={handleGfgSubmit} className="space-y-4">
+                {/* Scope selector */}
+                <div className="flex items-center gap-3 mb-4 bg-slate-700/40 p-1.5 rounded-lg border border-slate-700">
+                  <span className="text-xs text-slate-400 pl-2">Mode:</span>
+                  <button
+                    type="button"
+                    onClick={() => setCrawlScope('crawl')}
+                    className={`text-xs px-3 py-1.5 rounded-md font-medium transition ${
+                      crawlScope === 'crawl'
+                        ? 'bg-green-600 text-white shadow'
+                        : 'text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    📚 Crawl Full Topic / Section (All Pages)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCrawlScope('single')}
+                    className={`text-xs px-3 py-1.5 rounded-md font-medium transition ${
+                      crawlScope === 'single'
+                        ? 'bg-green-600 text-white shadow'
+                        : 'text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    📄 Single Page Only
+                  </button>
+                </div>
+
+                <form onSubmit={handleWebSubmit} className="space-y-4">
                   <div className="flex flex-col sm:flex-row gap-2">
                     <input
                       type="url"
                       value={url}
                       onChange={(e) => setUrl(e.target.value)}
-                      placeholder="https://www.geeksforgeeks.org/system-design/getting-started-with-system-design/"
+                      placeholder="https://www.geeksforgeeks.org/system-design/ or https://en.wikipedia.org/wiki/..."
                       required
                       disabled={loading}
                       className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-4 py-2.5 text-sm
@@ -506,22 +517,26 @@ export default function App() {
                       className="bg-green-600 hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed
                                  text-white font-semibold px-5 py-2.5 rounded-lg text-sm transition-colors whitespace-nowrap"
                     >
-                      {loading ? 'Crawling…' : 'Convert to EPUB'}
+                      {loading ? (crawlScope === 'crawl' ? 'Crawling…' : 'Extracting…') : 'Convert to EPUB'}
                     </button>
                   </div>
 
-                  {/* Example links */}
+                  {/* Example chips */}
                   <div className="flex flex-wrap items-center gap-2 pt-1">
                     <span className="text-slate-500 text-xs">Examples:</span>
                     {EXAMPLES.map((ex) => (
                       <button
-                        key={ex}
+                        key={ex.label}
                         type="button"
                         disabled={loading}
-                        onClick={() => setUrl(ex)}
+                        onClick={() => {
+                          setUrl(ex.url)
+                          if (ex.url.includes('wikipedia')) setCrawlScope('single')
+                          else setCrawlScope('crawl')
+                        }}
                         className="text-xs text-green-400 hover:text-green-300 underline disabled:opacity-50"
                       >
-                        {new URL(ex).pathname.split('/')[1] || 'tutorial'}
+                        {ex.label}
                       </button>
                     ))}
                   </div>
@@ -602,36 +617,33 @@ export default function App() {
                   </div>
 
                   {/* Or PDF URL */}
-                  <div className="flex items-center gap-3 my-2">
-                    <div className="flex-1 h-px bg-slate-700"></div>
-                    <span className="text-xs text-slate-500 uppercase tracking-wider font-semibold">
-                      or use direct PDF link
-                    </span>
-                    <div className="flex-1 h-px bg-slate-700"></div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-400 mb-1">
+                      Or paste a public PDF URL:
+                    </label>
+                    <input
+                      type="url"
+                      value={pdfUrl}
+                      onChange={(e) => setPdfUrl(e.target.value)}
+                      placeholder="https://arxiv.org/pdf/2301.00001.pdf"
+                      disabled={loading || !!pdfFile}
+                      className="w-full bg-slate-700/70 border border-slate-600 rounded-lg px-3 py-2 text-xs
+                                 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-green-500
+                                 disabled:opacity-50"
+                    />
                   </div>
 
-                  <input
-                    type="url"
-                    value={pdfUrl}
-                    onChange={(e) => setPdfUrl(e.target.value)}
-                    placeholder="https://example.com/document.pdf"
-                    disabled={loading || !!pdfFile}
-                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2 text-sm
-                               placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-green-500
-                               disabled:opacity-40"
-                  />
-
-                  {/* Optional Metadata */}
+                  {/* Title & Author */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                     <div>
                       <label className="block text-xs font-medium text-slate-400 mb-1">
-                        Book Title (optional)
+                        Ebook Title (Optional):
                       </label>
                       <input
                         type="text"
                         value={pdfTitle}
                         onChange={(e) => setPdfTitle(e.target.value)}
-                        placeholder="Auto-detected from PDF"
+                        placeholder="Custom Title"
                         disabled={loading}
                         className="w-full bg-slate-700/70 border border-slate-600 rounded-lg px-3 py-2 text-xs
                                    placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-green-500"
@@ -639,13 +651,13 @@ export default function App() {
                     </div>
                     <div>
                       <label className="block text-xs font-medium text-slate-400 mb-1">
-                        Author Name (optional)
+                        Author Name (Optional):
                       </label>
                       <input
                         type="text"
                         value={pdfAuthor}
                         onChange={(e) => setPdfAuthor(e.target.value)}
-                        placeholder="Auto-detected from PDF"
+                        placeholder="Author"
                         disabled={loading}
                         className="w-full bg-slate-700/70 border border-slate-600 rounded-lg px-3 py-2 text-xs
                                    placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-green-500"
@@ -720,20 +732,28 @@ export default function App() {
                 <div className="flex flex-col items-center gap-4 pt-2">
                   <div className="text-green-400 text-4xl">✅</div>
                   <p className="text-slate-300 text-sm text-center">
-                    Your Kindle-ready EPUB is generated and ready to download!
+                    Your Kindle-ready EPUB is generated!
                   </p>
+
+                  {downloadStatusMsg && (
+                    <div className="text-xs text-green-300 bg-green-950/60 border border-green-700/60 rounded-lg px-4 py-2 text-center">
+                      {downloadStatusMsg}
+                    </div>
+                  )}
+
                   <button
                     type="button"
-                    onClick={() => {
-                      if (downloadUrl) {
-                        triggerDownload(downloadUrl, downloadFilename)
-                      }
+                    onClick={async () => {
+                      const res = await saveAndDeliverEpub(downloadBlob || downloadUrl, downloadFilename)
+                      if (res.message) setDownloadStatusMsg(res.message)
                     }}
                     className="bg-green-600 hover:bg-green-500 text-white font-semibold px-8 py-3
-                               rounded-lg text-sm transition-colors flex items-center gap-2 shadow-lg hover:shadow-green-500/20"
+                               rounded-lg text-sm transition-colors flex items-center gap-2 shadow-lg hover:shadow-green-500/20 active:scale-95"
                   >
-                    <span>⬇️</span> Download EPUB
+                    <span>{isNative ? '📱' : '⬇️'}</span>
+                    <span>{isNative ? 'Open in Kindle / Save EPUB' : 'Download EPUB'}</span>
                   </button>
+
                   <button
                     onClick={() => {
                       reset()
@@ -750,7 +770,7 @@ export default function App() {
             </div>
           )}
 
-          {/* How it works */}
+          {/* How it works info */}
           {!status && (
             <div className="bg-slate-800/50 rounded-2xl border border-slate-700 p-6">
               <h3 className="font-semibold text-slate-300 mb-4 flex items-center gap-2">
@@ -759,22 +779,38 @@ export default function App() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-slate-400">
                 <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/60 space-y-1">
                   <div className="font-semibold text-slate-200 flex items-center gap-1.5">
-                    <span>📱</span> Native Android APK
+                    <span>🌐</span> GeeksForGeeks & Web Crawling
                   </div>
-                  <p>
-                    Runs natively inside an installable APK. Crawling uses native Android OkHttp to fetch
-                    GFG without CORS restrictions.
-                  </p>
+                  <div>
+                    Recursively crawls all chapters in a topic (like System Design, DSA) or single article mode.
+                  </div>
                 </div>
 
                 <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/60 space-y-1">
                   <div className="font-semibold text-slate-200 flex items-center gap-1.5">
-                    <span>📄</span> Offline PDF to EPUB
+                    <span>📱</span> Direct Kindle Integration
                   </div>
-                  <p>
-                    Converts PDFs to Kindle-ready reflowable EPUBs directly on your device with no
-                    backend or PC required.
-                  </p>
+                  <div>
+                    Writes directly to Android Documents and opens the Kindle app sharing sheet with 1 tap.
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/60 space-y-1">
+                  <div className="font-semibold text-slate-200 flex items-center gap-1.5">
+                    <span>📕</span> Offline PDF to EPUB
+                  </div>
+                  <div>
+                    Extracts text and code blocks from local or online PDFs in device memory.
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/60 space-y-1">
+                  <div className="font-semibold text-slate-200 flex items-center gap-1.5">
+                    <span>⚡</span> 100% In-App / No Server
+                  </div>
+                  <div>
+                    Powered by native Android OkHttp (CapacitorHttp) to bypass browser CORS on your phone.
+                  </div>
                 </div>
               </div>
             </div>
@@ -783,8 +819,8 @@ export default function App() {
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-slate-700 px-6 py-4 text-center text-slate-500 text-xs">
-        KindleWebpageMaker — Native Android APK & Web Edition
+      <footer className="border-t border-slate-800 py-4 px-4 text-center text-xs text-slate-500">
+        KindleWebpageMaker • Standalone Native Android App
       </footer>
     </div>
   )

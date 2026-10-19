@@ -1,13 +1,16 @@
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
 
-const DELAY_MS = 600
-const MAX_PAGES = 150
+const DELAY_MS = 400
+const MAX_PAGES = Infinity
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function normaliseUrl(url) {
+/**
+ * Normalize URL: strip hash, query parameters, and trailing slash
+ */
+export function normaliseUrl(url) {
   try {
     const u = new URL(url)
     u.hash = ''
@@ -21,21 +24,30 @@ function normaliseUrl(url) {
   }
 }
 
-async function fetchHtml(url) {
+/**
+ * Fetch HTML using Native Android HTTP (bypasses browser CORS) or standard fetch
+ */
+export async function fetchHtml(url) {
   try {
     if (Capacitor.isNativePlatform()) {
-      // Native Android HTTP (bypasses browser CORS)
       const response = await CapacitorHttp.get({
         url,
         headers: {
           'User-Agent':
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
         },
       })
-      return response.data || null
+      if (response.status && response.status >= 400) {
+        console.warn(`[client crawler] HTTP ${response.status} for ${url}`)
+        return null
+      }
+      const data = response.data
+      if (typeof data === 'string') return data
+      if (data && typeof data === 'object') return JSON.stringify(data)
+      return null
     } else {
-      // Standard fetch (with fallback proxy if needed)
       const res = await fetch(url)
       if (!res.ok) return null
       return await res.text()
@@ -48,11 +60,15 @@ async function fetchHtml(url) {
 
 function isPathUnderSection(normPath, normPrefix) {
   if (normPath.startsWith(normPrefix + '/')) return true
+  if (normPath === normPrefix) return true
   if (normPrefix === '/dsa' && normPath.startsWith('/data-structures/')) return true
   if (normPrefix === '/data-structures' && normPath.startsWith('/dsa/')) return true
   return false
 }
 
+/**
+ * Extract links from sidebar containers (GFG and docs sidebars)
+ */
 function extractSidebarLinks(doc, baseOrigin, prefix) {
   const links = []
   const sidebarSelectors = [
@@ -70,37 +86,71 @@ function extractSidebarLinks(doc, baseOrigin, prefix) {
   const normPrefix = prefix.replace(/\/$/, '')
 
   for (const sel of sidebarSelectors) {
-    const container = doc.querySelector(sel)
-    if (!container) continue
-    const anchorElements = container.querySelectorAll('a[href]')
-    anchorElements.forEach((el) => {
-      const href = el.getAttribute('href') || ''
-      if (!href.startsWith('http') && !href.startsWith('/')) return
-      try {
-        const u = new URL(href, baseOrigin)
-        if (u.origin !== baseOrigin) return
-        const normPath = u.pathname.replace(/\/$/, '')
-        if (!isPathUnderSection(normPath, normPrefix)) return
-        const norm = normaliseUrl(u.toString())
-        if (!visited.has(norm)) {
-          visited.add(norm)
-          links.push(norm)
+    const containers = doc.querySelectorAll(sel)
+    containers.forEach((container) => {
+      const anchorElements = container.querySelectorAll('a[href]')
+      anchorElements.forEach((el) => {
+        const href = el.getAttribute('href') || ''
+        if (!href.startsWith('http') && !href.startsWith('/')) return
+        try {
+          const u = new URL(href, baseOrigin)
+          if (u.origin !== baseOrigin) return
+          const normPath = u.pathname.replace(/\/$/, '')
+          if (!isPathUnderSection(normPath, normPrefix)) return
+          const norm = normaliseUrl(u.toString())
+          if (!visited.has(norm)) {
+            visited.add(norm)
+            links.push(norm)
+          }
+        } catch {
+          // ignore invalid URLs
         }
-      } catch {
-        // Skip invalid URLs
-      }
+      })
     })
   }
 
   return links
 }
 
+/**
+ * Extract all links on the page that belong to the same section prefix.
+ */
+function extractPageLinks(doc, baseOrigin, prefix, visited) {
+  const links = []
+  const normPrefix = prefix.replace(/\/$/, '')
+  const anchors = doc.querySelectorAll('a[href]')
+
+  anchors.forEach((el) => {
+    const href = el.getAttribute('href') || ''
+    if (!href || href.startsWith('javascript') || href.startsWith('#')) return
+    try {
+      const u = new URL(href, baseOrigin)
+      if (u.origin !== baseOrigin) return
+      const normPath = u.pathname.replace(/\/$/, '')
+      if (!isPathUnderSection(normPath, normPrefix)) return
+      const norm = normaliseUrl(u.toString())
+      if (!visited.has(norm)) {
+        visited.add(norm)
+        links.push(norm)
+      }
+    } catch {
+      // ignore
+    }
+  })
+
+  return links
+}
+
+/**
+ * Clean article DOM and format into Kindle-compatible HTML
+ */
 function cleanArticleDom(bodyEl, title) {
   const stripSelectors = [
     'script',
     'style',
     'noscript',
     'ins',
+    'iframe',
     '[class*="LeftbarContainer"]',
     '[class*="RightBar"]',
     '[class*="leftBar"]',
@@ -135,62 +185,150 @@ function cleanArticleDom(bodyEl, title) {
 
   // Strip inline styles and wrapper classes
   bodyEl.querySelectorAll('[style]').forEach((el) => el.removeAttribute('style'))
-  bodyEl.querySelectorAll('div, span, p, section, aside').forEach((el) => el.removeAttribute('class'))
+  bodyEl.querySelectorAll('div, span, section, aside').forEach((el) => el.removeAttribute('class'))
+
+  // --- Normalize and resolve all images ---
+  bodyEl.querySelectorAll('img').forEach((img) => {
+    let rawSrc =
+      img.getAttribute('data-src') ||
+      img.getAttribute('data-lazy-src') ||
+      img.getAttribute('data-original') ||
+      img.getAttribute('src') ||
+      ''
+
+    img.removeAttribute('srcset')
+    img.removeAttribute('data-src')
+    img.removeAttribute('data-lazy-src')
+    img.removeAttribute('data-original')
+    img.removeAttribute('loading')
+
+    rawSrc = rawSrc.trim()
+    if (!rawSrc || rawSrc.startsWith('data:image/svg')) {
+      img.remove()
+      return
+    }
+
+    try {
+      const resolved = new URL(rawSrc, url).toString()
+      img.setAttribute('src', resolved)
+    } catch {
+      img.remove()
+    }
+  })
 
   return `<h1>${title}</h1>\n${bodyEl.innerHTML || ''}`
 }
 
-function extractArticleContent(html, url) {
+/**
+ * Extract clean readable article content from HTML (supports GFG and generic websites)
+ */
+export function extractArticleContent(html, url) {
   const parser = new DOMParser()
   const doc = parser.parseFromString(html, 'text/html')
 
-  const titleEl = doc.querySelector('h1') || doc.querySelector('title')
-  const title = titleEl ? titleEl.textContent.replace(/ ?[|\-–] .*$/, '').trim() : url
+  // Find title
+  const titleEl =
+    doc.querySelector('h1') ||
+    doc.querySelector('meta[property="og:title"]') ||
+    doc.querySelector('title')
 
-  const bodySelectors = [
+  let title = ''
+  if (titleEl) {
+    title = (titleEl.getAttribute?.('content') || titleEl.textContent || '')
+      .replace(/ ?[|\-–] .*$/, '')
+      .trim()
+  }
+  if (!title) {
+    try {
+      const u = new URL(url)
+      const parts = u.pathname.split('/').filter(Boolean)
+      title = parts[parts.length - 1] || u.hostname
+    } catch {
+      title = 'Article'
+    }
+  }
+
+  // Find main content container
+  const candidateSelectors = [
+    // GFG specific selectors
     '[class*="articleMainContent"]',
     '[class*="article--viewer_content"]',
     '[class*="article-viewer"]',
     '[class*="ArticleContent"]',
     '.article-body',
+    // Generic article selectors
     'article',
-    '.entry-content',
+    '[role="main"]',
     'main',
+    '.post-content',
+    '.entry-content',
+    '.article-content',
+    '.markdown-body',
+    '#content',
+    '.content',
   ]
 
   let body = null
-  for (const sel of bodySelectors) {
+  for (const sel of candidateSelectors) {
     const el = doc.querySelector(sel)
-    if (el && el.textContent.trim().length > 100) {
+    if (el && el.textContent.trim().length > 120) {
       body = el
       break
     }
   }
 
-  if (!body) body = doc.body
+  if (!body) body = doc.body || doc.documentElement
 
-  const cleanHtml = cleanArticleDom(body, title)
+  // Clone node to avoid modifying original
+  const clone = body.cloneNode(true)
+  const cleanHtml = cleanArticleDom(clone, title, url)
   return { title, html: cleanHtml }
 }
 
-export async function crawlAndExtractGfgClient(startUrl, onProgress = () => {}) {
+/**
+ * Crawl and extract pages client-side using true BFS.
+ * Supports up to MAX_PAGES (200), discovering links on EVERY crawled sub-page.
+ *
+ * @param {string} startUrl - Starting URL (GFG or any website)
+ * @param {object} options - { singlePage: boolean, maxPages: number }
+ * @param {function} onProgress - Live progress callback
+ */
+export async function crawlAndExtractClient(startUrl, options = {}, onProgress = () => {}) {
+  const singlePage = options.singlePage || false
+  const maxLimit = options.maxPages || MAX_PAGES
+
   const startNorm = normaliseUrl(startUrl)
   const startParsed = new URL(startNorm)
   const baseOrigin = startParsed.origin
   const pathParts = startParsed.pathname.split('/').filter(Boolean)
-  const prefix = '/' + (pathParts[0] || 'dsa')
+
+  const isGfg = startParsed.hostname.includes('geeksforgeeks.org')
+
+  // Derive section prefix (e.g. /system-design/ or /docs/tutorial/)
+  let prefix = '/'
+  if (pathParts.length > 0) {
+    prefix = '/' + pathParts[0]
+  }
+
+  // Derive title from section or URL
+  let sectionName = pathParts[0] || startParsed.hostname
+  sectionName = sectionName
+    .replace(/[-_]/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase())
 
   onProgress({ status: 'crawling', found: 1, processed: 0, total: 1 })
 
   let seedHtml = await fetchHtml(startNorm)
   let activeSeedUrl = startNorm
 
-  if (!seedHtml) {
+  // If initial GFG page fails (e.g. /system-design/ 404), attempt common article entrypoints
+  if (!seedHtml && isGfg) {
     const fallbackPaths = [
       `${prefix}/dsa-tutorial-learn-data-structures-and-algorithms/`,
       `${prefix}/getting-started-with-${pathParts[0]}/`,
       `${prefix}/introduction-to-${pathParts[0]}/`,
       `${prefix}/${pathParts[0]}-tutorial/`,
+      `${prefix}/${pathParts[0]}-introduction/`,
       `/data-structures/introduction-to-data-structures/`,
     ]
     for (const fp of fallbackPaths) {
@@ -204,74 +342,109 @@ export async function crawlAndExtractGfgClient(startUrl, onProgress = () => {}) 
   }
 
   if (!seedHtml) {
-    throw new Error(`Could not fetch the GFG starting page for: ${startUrl}`)
+    throw new Error(`Could not fetch the starting page for: ${startUrl}`)
   }
 
-  const parser = new DOMParser()
-  const seedDoc = parser.parseFromString(seedHtml, 'text/html')
-  const sidebarLinks = extractSidebarLinks(seedDoc, baseOrigin, prefix)
-
-  const urlsToCrawl = [activeSeedUrl]
-  const visited = new Set([activeSeedUrl])
-
-  sidebarLinks.forEach((link) => {
-    if (!visited.has(link) && urlsToCrawl.length < MAX_PAGES) {
-      visited.add(link)
-      urlsToCrawl.push(link)
+  // If single page mode, just extract this one page
+  if (singlePage) {
+    onProgress({ status: 'extracting', found: 1, processed: 0, total: 1 })
+    const chapter = extractArticleContent(seedHtml, activeSeedUrl)
+    onProgress({ status: 'extracting', found: 1, processed: 1, total: 1 })
+    return {
+      sectionName: chapter.title || sectionName,
+      chapters: [chapter],
     }
-  })
+  }
 
-  onProgress({
-    status: 'extracting',
-    found: urlsToCrawl.length,
-    processed: 0,
-    total: urlsToCrawl.length,
-  })
-
+  // BFS crawl setup
+  const visited = new Set([activeSeedUrl])
+  const queue = [activeSeedUrl]
   const chapters = []
 
-  // Extract first page
-  const firstChapter = extractArticleContent(seedHtml, activeSeedUrl)
-  if (firstChapter) chapters.push(firstChapter)
+  // Extract links from seed document
+  const parser = new DOMParser()
+  const seedDoc = parser.parseFromString(seedHtml, 'text/html')
+  const initialSidebarLinks = extractSidebarLinks(seedDoc, baseOrigin, prefix)
+
+  for (const link of initialSidebarLinks) {
+    if (!visited.has(link) && queue.length < maxLimit) {
+      visited.add(link)
+      queue.push(link)
+    }
+  }
+
+  // If sidebar gave few links, also scan seed page links
+  if (queue.length < 5) {
+    const pageLinks = extractPageLinks(seedDoc, baseOrigin, prefix, visited)
+    for (const link of pageLinks) {
+      if (queue.length >= maxLimit) break
+      queue.push(link)
+    }
+  }
 
   onProgress({
-    status: 'extracting',
-    found: urlsToCrawl.length,
-    processed: 1,
-    total: urlsToCrawl.length,
+    status: 'crawling',
+    found: visited.size,
+    processed: 0,
+    total: visited.size,
   })
 
-  // Extract remaining pages
-  for (let i = 1; i < urlsToCrawl.length; i++) {
-    const pageUrl = urlsToCrawl[i]
-    await sleep(DELAY_MS)
+  // --- BFS Loop: Fetch & Discover up to maxLimit (200 pages) ---
+  while (queue.length > 0 && chapters.length < maxLimit) {
+    const currentUrl = queue.shift()
 
-    const pageHtml = await fetchHtml(pageUrl)
-    if (pageHtml) {
-      const chapter = extractArticleContent(pageHtml, pageUrl)
-      if (chapter) chapters.push(chapter)
+    // Fetch page HTML
+    let currentHtml = currentUrl === activeSeedUrl ? seedHtml : await fetchHtml(currentUrl)
+    if (!currentHtml) continue
+
+    // Extract chapter content
+    const chapter = extractArticleContent(currentHtml, currentUrl)
+    if (chapter && chapter.html) {
+      chapters.push(chapter)
     }
 
     onProgress({
       status: 'extracting',
-      found: urlsToCrawl.length,
-      processed: i + 1,
-      total: urlsToCrawl.length,
+      found: visited.size,
+      processed: chapters.length,
+      total: visited.size,
     })
+
+    // Discover new links from this page to continue BFS crawl up to 200 pages!
+    if (visited.size < maxLimit) {
+      const pageDoc = parser.parseFromString(currentHtml, 'text/html')
+      let newLinks = extractSidebarLinks(pageDoc, baseOrigin, prefix).filter((l) => !visited.has(l))
+
+      if (newLinks.length === 0) {
+        newLinks = extractPageLinks(pageDoc, baseOrigin, prefix, visited)
+      }
+
+      for (const link of newLinks) {
+        if (visited.size >= maxLimit) break
+        visited.add(link)
+        queue.push(link)
+      }
+
+      onProgress({
+        status: 'extracting',
+        found: visited.size,
+        processed: chapters.length,
+        total: visited.size,
+      })
+    }
+
+    await sleep(DELAY_MS)
   }
 
   if (chapters.length === 0) {
-    throw new Error('Could not extract readable article content from any page.')
+    throw new Error('Could not extract readable article content from the provided website.')
   }
-
-  // Derive Section Name
-  const sectionName = (pathParts[0] || 'GeeksForGeeks')
-    .split('-')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ')
 
   return {
     sectionName,
     chapters,
   }
 }
+
+// Backwards compatibility alias
+export const crawlAndExtractGfgClient = crawlAndExtractClient
