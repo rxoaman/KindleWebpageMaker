@@ -144,7 +144,7 @@ function extractPageLinks(doc, baseOrigin, prefix, visited) {
 /**
  * Clean article DOM and format into Kindle-compatible HTML
  */
-function cleanArticleDom(bodyEl, title) {
+function cleanArticleDom(bodyEl, title, url = '') {
   const stripSelectors = [
     'script',
     'style',
@@ -183,9 +183,19 @@ function cleanArticleDom(bodyEl, title) {
     bodyEl.querySelectorAll(sel).forEach((el) => el.remove())
   })
 
+  // --- Restructure wide tables for 6" to 7" E-ink displays ---
+  restructureTablesDom(bodyEl)
+
+  // --- Mark footnotes for native KOReader popup dialogs ---
+  markFootnotesDom(bodyEl)
+
   // Strip inline styles and wrapper classes
   bodyEl.querySelectorAll('[style]').forEach((el) => el.removeAttribute('style'))
-  bodyEl.querySelectorAll('div, span, section, aside').forEach((el) => el.removeAttribute('class'))
+  bodyEl.querySelectorAll('div, span, section, aside').forEach((el) => {
+    if (!el.className?.includes('card-') && !el.className?.includes('noteref') && !el.className?.includes('footnote')) {
+      el.removeAttribute('class')
+    }
+  })
 
   // --- Normalize and resolve all images ---
   bodyEl.querySelectorAll('img').forEach((img) => {
@@ -216,7 +226,84 @@ function cleanArticleDom(bodyEl, title) {
     }
   })
 
-  return `<h1>${title}</h1>\n${bodyEl.innerHTML || ''}`
+  return `<article class="chapter-content">\n<h1>${escapeXml(title)}</h1>\n${bodyEl.innerHTML || ''}\n</article>`
+}
+
+function escapeXml(unsafe) {
+  return String(unsafe || '')
+    .replace(/[<>&'"]/g, (c) => {
+      switch (c) {
+        case '<': return '&lt;'
+        case '>': return '&gt;'
+        case '&': return '&amp;'
+        case '\'': return '&apos;'
+        case '"': return '&quot;'
+      }
+    })
+}
+
+function restructureTablesDom(bodyEl) {
+  if (typeof document === 'undefined') return
+  bodyEl.querySelectorAll('table').forEach((table) => {
+    const headers = Array.from(table.querySelectorAll('thead th, tr:first-child th')).map((th) => th.textContent.trim())
+    const rows = Array.from(table.querySelectorAll('tbody tr, tr'))
+    const maxCols = Math.max(headers.length, ...rows.map((r) => r.querySelectorAll('td, th').length))
+
+    if (maxCols > 3) {
+      const cardTable = document.createElement('div')
+      cardTable.className = 'eink-card-table'
+      cardTable.setAttribute('role', 'region')
+      cardTable.setAttribute('aria-label', 'Table')
+
+      rows.forEach((r) => {
+        if (r.querySelectorAll('th').length > 0 && r.querySelectorAll('td').length === 0) return
+        const cells = Array.from(r.querySelectorAll('td, th'))
+        if (cells.length === 0) return
+
+        const rowDiv = document.createElement('div')
+        rowDiv.className = 'card-row'
+
+        cells.forEach((cell, idx) => {
+          const header = headers[idx] || `Field ${idx + 1}`
+          const content = cell.innerHTML.trim()
+          if (content) {
+            const field = document.createElement('div')
+            field.className = 'card-field'
+            field.innerHTML = `<span class="card-label">${escapeXml(header)}:</span> <span class="card-val">${content}</span>`
+            rowDiv.appendChild(field)
+          }
+        })
+
+        if (rowDiv.children.length > 0) {
+          cardTable.appendChild(rowDiv)
+        }
+      })
+
+      table.replaceWith(cardTable)
+    }
+  })
+}
+
+function markFootnotesDom(bodyEl) {
+  if (typeof document === 'undefined') return
+  bodyEl.querySelectorAll('a[href^="#"]').forEach((a) => {
+    const href = a.getAttribute('href') || ''
+    const text = a.textContent.trim()
+    if (href.match(/#(fn|footnote|cite_note|ref)/i) || text.match(/^\[?\d+\]?$/) || a.parentElement?.tagName === 'SUP') {
+      a.setAttribute('epub:type', 'noteref')
+      a.classList.add('noteref')
+      if (a.parentElement?.tagName !== 'SUP') {
+        const sup = document.createElement('sup')
+        a.replaceWith(sup)
+        sup.appendChild(a)
+      }
+    }
+  })
+
+  bodyEl.querySelectorAll('[id^="fn"], [id^="footnote"], [id^="cite_note"], .footnote, .footnotes li').forEach((el) => {
+    el.setAttribute('epub:type', 'footnote')
+    el.classList.add('footnote')
+  })
 }
 
 /**
@@ -282,7 +369,7 @@ export function extractArticleContent(html, url) {
   // Clone node to avoid modifying original
   const clone = body.cloneNode(true)
   const cleanHtml = cleanArticleDom(clone, title, url)
-  return { title, html: cleanHtml }
+  return { title, html: cleanHtml, url }
 }
 
 /**

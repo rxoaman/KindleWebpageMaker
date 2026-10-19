@@ -1,40 +1,175 @@
 import JSZip from 'jszip'
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
 
-const CODE_CSS = `
-  body { font-family: Georgia, serif; font-size: 1em; line-height: 1.6; padding: 2%; color: #111; }
-  h1 { font-size: 1.6em; font-weight: bold; margin-bottom: 0.5em; }
-  h2 { font-size: 1.3em; font-weight: bold; margin-top: 1em; }
-  h3 { font-size: 1.1em; font-weight: bold; margin-top: 0.8em; }
-  p { margin: 0.8em 0; }
+/**
+ * High-contrast monochrome CSS optimized specifically for KOReader on E-ink screens.
+ * Uses relative rem/em typography for smooth font scaling, borders on code/tables,
+ * word-break preventing horizontal overflow, and dedicated footnote styling.
+ */
+const KO_READER_EINK_CSS = `
+  @page {
+    margin: 1.2rem 0.8rem;
+  }
+  body {
+    font-family: Georgia, "Nimbus Roman No9 L", "Times New Roman", serif;
+    font-size: 1rem;
+    line-height: 1.55;
+    color: #000000;
+    background-color: #ffffff;
+    margin: 0;
+    padding: 0;
+    text-align: justify;
+    text-justify: inter-word;
+    hyphens: auto;
+    -webkit-hyphens: auto;
+  }
+  article.chapter-content {
+    margin: 0 auto;
+    max-width: 100%;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-weight: bold;
+    color: #000000;
+    line-height: 1.25;
+    page-break-after: avoid;
+    break-after: avoid;
+  }
+  h1 {
+    font-size: 1.55rem;
+    margin-top: 1.2rem;
+    margin-bottom: 0.6rem;
+    padding-bottom: 0.3rem;
+    border-bottom: 2px solid #000000;
+  }
+  h2 { font-size: 1.3rem; margin-top: 1.1rem; margin-bottom: 0.45rem; }
+  h3 { font-size: 1.1rem; margin-top: 0.9rem; margin-bottom: 0.35rem; }
+  p { margin: 0.75rem 0; text-indent: 0; }
+  blockquote {
+    margin: 0.8rem 0.6rem;
+    padding: 0.4rem 0.8rem;
+    border-left: 3px solid #000000;
+    background: #f8f8f8;
+    font-style: italic;
+  }
   pre {
-    background: #f4f4f4;
-    border: 1px solid #ddd;
-    padding: 0.8em;
-    font-size: 0.85em;
+    font-family: "Courier New", Courier, monospace;
+    background: #f0f0f0;
+    border: 1px solid #000000;
+    padding: 0.6rem;
+    font-size: 0.85rem;
+    line-height: 1.35;
     overflow-x: auto;
     white-space: pre-wrap;
-    word-break: break-all;
+    word-break: break-word;
+    margin: 0.85rem 0;
+    page-break-inside: avoid;
+    break-inside: avoid;
   }
   code {
     font-family: "Courier New", Courier, monospace;
-    background: #f4f4f4;
-    padding: 0.1em 0.3em;
-    font-size: 0.9em;
+    background: #f0f0f0;
+    padding: 0.1rem 0.25rem;
+    font-size: 0.88rem;
+    border: 1px solid #d0d0d0;
+    border-radius: 2px;
   }
-  table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }
-  th, td { border: 1px solid #ccc; padding: 0.3em 0.5em; }
-  th { background: #eee; }
-  img { max-width: 100%; height: auto; display: block; margin: 1em auto; }
+  /* Standard simple tables (<= 3 columns) */
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1rem 0;
+    font-size: 0.88rem;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  th, td {
+    border: 1px solid #000000;
+    padding: 0.4rem 0.5rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background-color: #f0f0f0;
+    font-weight: bold;
+  }
+  /* Restructured wide tables (> 3 columns) for 6"-7" E-ink displays */
+  .eink-card-table {
+    margin: 1rem 0;
+    border: 1px solid #000000;
+    padding: 0.5rem;
+    background: #ffffff;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  .eink-card-table .card-row {
+    margin-bottom: 0.6rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px dashed #777777;
+  }
+  .eink-card-table .card-row:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+  }
+  .eink-card-table .card-label {
+    font-weight: bold;
+    color: #000000;
+    display: block;
+    font-size: 0.88rem;
+  }
+  .eink-card-table .card-val {
+    display: block;
+    margin-left: 0.4rem;
+    font-size: 0.88rem;
+  }
+  /* Images: centered, 100% max width, crisp e-ink rendering */
+  img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 1.2rem auto;
+    page-break-inside: avoid;
+    break-inside: avoid;
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
+  }
   .img-placeholder {
     display: block;
-    margin: 1em 0;
-    padding: 0.8em;
+    margin: 1rem 0;
+    padding: 0.6rem;
     background: #f0f0f0;
-    border: 1px dashed #bbb;
-    font-size: 0.9em;
-    color: #666;
+    border: 1px dashed #000000;
+    font-size: 0.85rem;
+    color: #000000;
     text-align: center;
+  }
+  /* Footnotes & semantic popups in KOReader */
+  aside[epub\\:type="footnote"], .footnote {
+    margin: 0.8rem 0;
+    padding: 0.4rem 0.6rem;
+    border-left: 2px solid #555555;
+    font-size: 0.85rem;
+    background: #fafafa;
+  }
+  a[epub\\:type="noteref"], .noteref {
+    font-weight: bold;
+    text-decoration: none;
+    color: #000000;
+    vertical-align: super;
+    font-size: 0.75rem;
+    padding: 0 0.15rem;
+  }
+  a {
+    color: #000000;
+    text-decoration: underline;
+  }
+  nav#toc ol {
+    padding-left: 1.2rem;
+    line-height: 1.7;
+  }
+  nav#toc li {
+    margin: 0.4rem 0;
   }
 `
 
@@ -51,8 +186,22 @@ function escapeXml(unsafe) {
     })
 }
 
+function normaliseUrl(url) {
+  try {
+    const u = new URL(url)
+    u.hash = ''
+    u.search = ''
+    let path = u.pathname
+    if (path.endsWith('/') && path !== '/') path = path.slice(0, -1)
+    u.pathname = path
+    return u.toString()
+  } catch {
+    return url
+  }
+}
+
 /**
- * Fetch image data as Blob using native CapacitorHttp or standard fetch
+ * Fetch image data as Blob using native CapacitorHttp or standard fetch with proxy fallback
  */
 async function fetchImageBlob(url) {
   if (Capacitor.isNativePlatform()) {
@@ -70,14 +219,16 @@ async function fetchImageBlob(url) {
       if (res.data) {
         if (res.data instanceof Blob) return res.data
         if (typeof res.data === 'string') {
-          // If Capacitor returned base64 string
           const base64Data = res.data.startsWith('data:') ? res.data.split(',')[1] : res.data
           const binary = atob(base64Data)
           const bytes = new Uint8Array(binary.length)
           for (let i = 0; i < binary.length; i++) {
             bytes[i] = binary.charCodeAt(i)
           }
-          const mime = res.headers?.['content-type'] || 'image/jpeg'
+          const mime =
+            res.headers?.['content-type'] ||
+            res.headers?.['Content-Type'] ||
+            (/\.webp/i.test(url) ? 'image/webp' : /\.png/i.test(url) ? 'image/png' : 'image/jpeg')
           return new Blob([bytes], { type: mime })
         }
       }
@@ -86,23 +237,39 @@ async function fetchImageBlob(url) {
     }
   }
 
-  // Browser fetch fallback
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  return await res.blob()
+  // Browser fetch with backend proxy fallback
+  try {
+    const res = await fetch(url)
+    if (res.ok) return await res.blob()
+  } catch (corsErr) {
+    try {
+      const proxyRes = await fetch(`/api/proxy-image?url=${encodeURIComponent(url)}`)
+      if (proxyRes.ok) return await proxyRes.blob()
+    } catch {}
+  }
+
+  try {
+    const proxyRes = await fetch(`/api/proxy-image?url=${encodeURIComponent(url)}`)
+    if (proxyRes.ok) return await proxyRes.blob()
+  } catch {}
+
+  throw new Error(`Failed to fetch image ${url}`)
 }
 
 /**
- * Convert WebP or unsupported image to JPEG using Canvas for 100% Kindle compatibility
+ * Convert image to high-contrast monochrome E-ink JPEG using Canvas
  */
 async function processImageForKindle(blob, originalUrl) {
-  const isWebp = blob.type === 'image/webp' || /\.webp(\?.*)?$/i.test(originalUrl)
-  const isPng = blob.type === 'image/png' || /\.png(\?.*)?$/i.test(originalUrl)
-  const isGif = blob.type === 'image/gif' || /\.gif(\?.*)?$/i.test(originalUrl)
   const isSvg = blob.type === 'image/svg+xml' || /\.svg(\?.*)?$/i.test(originalUrl)
+  if (isSvg) {
+    return {
+      buffer: await blob.arrayBuffer(),
+      ext: 'svg',
+      mimeType: 'image/svg+xml',
+    }
+  }
 
-  // WebP is not supported by Amazon Kindle devices. Convert to JPEG!
-  if (isWebp && typeof document !== 'undefined') {
+  if (typeof document !== 'undefined') {
     try {
       let bitmap
       if (typeof createImageBitmap === 'function') {
@@ -121,12 +288,31 @@ async function processImageForKindle(blob, originalUrl) {
       canvas.height = bitmap.height || bitmap.naturalHeight || 600
       const ctx = canvas.getContext('2d')
 
-      // White background for any transparent pixels
+      // White background
       ctx.fillStyle = '#FFFFFF'
       ctx.fillRect(0, 0, canvas.width, canvas.height)
       ctx.drawImage(bitmap, 0, 0)
 
-      const jpegBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9))
+      // Contrast-enhanced 16-level E-ink grayscale conversion
+      try {
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+        const d = imgData.data
+        for (let p = 0; p < d.length; p += 4) {
+          const gray = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2]
+          // Boost contrast slightly for razor-sharp diagrams on E-ink
+          const enhanced = Math.min(255, Math.max(0, (gray - 128) * 1.15 + 128))
+          d[p] = enhanced
+          d[p + 1] = enhanced
+          d[p + 2] = enhanced
+        }
+        ctx.putImageData(imgData, 0, 0)
+      } catch (pxErr) {
+        // Fallback to basic grayscale filter if pixel manipulation restricted
+        ctx.filter = 'grayscale(100%)'
+        ctx.drawImage(bitmap, 0, 0)
+      }
+
+      const jpegBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.82))
       if (jpegBlob) {
         return {
           buffer: await jpegBlob.arrayBuffer(),
@@ -135,31 +321,25 @@ async function processImageForKindle(blob, originalUrl) {
         }
       }
     } catch (convErr) {
-      console.warn('[epubGenerator] WebP to JPEG canvas conversion failed:', convErr)
+      console.warn('[epubGenerator] Canvas E-ink image conversion failed, using original:', convErr)
     }
   }
 
-  let ext = 'jpg'
-  let mimeType = 'image/jpeg'
-
-  if (isPng) { ext = 'png'; mimeType = 'image/png' }
-  else if (isGif) { ext = 'gif'; mimeType = 'image/gif' }
-  else if (isSvg) { ext = 'svg'; mimeType = 'image/svg+xml' }
-
+  const isPng = blob.type === 'image/png' || /\.png(\?.*)?$/i.test(originalUrl)
   return {
     buffer: await blob.arrayBuffer(),
-    ext,
-    mimeType,
+    ext: isPng ? 'png' : 'jpg',
+    mimeType: isPng ? 'image/png' : 'image/jpeg',
   }
 }
 
 /**
- * Builds a valid, self-contained EPUB 2.0 archive with all images stored locally in OEBPS/images/.
+ * Builds a valid, self-contained EPUB3 archive optimized for KOReader on E-ink screens.
  *
  * @param {Object} options
  * @param {string} options.title - Book title
  * @param {string} [options.author] - Author name
- * @param {Array<{ title: string, html: string }>} options.chapters
+ * @param {Array<{ title: string, html: string, url?: string }>} options.chapters
  * @returns {Promise<Blob>}
  */
 export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', chapters = [] }) {
@@ -167,6 +347,7 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
   const bookTitle = title || 'eBook'
   const bookAuthor = author || 'KindleWebpageMaker'
   const bookId = `urn:uuid:${Math.random().toString(36).substring(2)}-${Date.now()}`
+  const isoDate = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
 
   // 1. mimetype (MUST be first, uncompressed)
   zip.file('mimetype', 'application/epub+zip', { compression: 'STORE' })
@@ -186,12 +367,20 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
   const imagesFolder = oebps.folder('images')
 
   // 3. OEBPS/style.css
-  oebps.file('style.css', CODE_CSS)
+  oebps.file('style.css', KO_READER_EINK_CSS)
 
-  // 4. Scan all chapters for images and download them
+  // 4. Build Intra-Book Link Dictionary
+  const urlToChapter = new Map()
+  chapters.forEach((ch, idx) => {
+    if (ch.url) {
+      urlToChapter.set(normaliseUrl(ch.url), `chapter_${idx}.xhtml`)
+    }
+  })
+
+  // 5. Scan all chapters for images and download them
   console.log(`[epubGenerator] Scanning ${chapters.length} chapters for images...`)
   const parser = new DOMParser()
-  const imageMap = new Map() // originalUrl -> { localFilename, mimeType, buffer }
+  const imageMap = new Map()
 
   chapters.forEach((ch) => {
     if (!ch.html) return
@@ -204,12 +393,11 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
     })
   })
 
-  console.log(`[epubGenerator] Found ${imageMap.size} unique images. Downloading & bundling...`)
+  console.log(`[epubGenerator] Found ${imageMap.size} unique images. Downloading & converting to E-ink grayscale...`)
 
   const imageUrls = Array.from(imageMap.keys())
   let savedCount = 0
 
-  // Download images in batches of 4
   for (let i = 0; i < imageUrls.length; i += 4) {
     const batch = imageUrls.slice(i, i + 4)
     await Promise.all(
@@ -235,12 +423,13 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
     )
   }
 
-  console.log(`[epubGenerator] Successfully saved ${savedCount} images into OEBPS/images/.`)
+  console.log(`[epubGenerator] Successfully saved ${savedCount} high-contrast E-ink images into OEBPS/images/.`)
 
-  // 5. Rewrite chapters HTML to reference local images/
+  // 6. Rewrite chapters HTML (Images + Intra-book links)
   const manifestItems = []
   const spineItems = []
   const navPoints = []
+  const navListItems = []
 
   chapters.forEach((ch, i) => {
     const filename = `chapter_${i}.xhtml`
@@ -249,6 +438,7 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
 
     const doc = parser.parseFromString(ch.html || '', 'text/html')
 
+    // Rewrite images
     doc.querySelectorAll('img').forEach((img) => {
       const src = img.getAttribute('src')
       const alt = img.getAttribute('alt') || 'Diagram'
@@ -257,7 +447,6 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
         img.setAttribute('src', `images/${local}`)
         img.removeAttribute('srcset')
       } else if (src && src.startsWith('http')) {
-        // Fallback placeholder instead of broken remote link
         const placeholder = doc.createElement('div')
         placeholder.className = 'img-placeholder'
         placeholder.textContent = `[Image: ${alt}]`
@@ -265,11 +454,27 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
       }
     })
 
+    // Rewrite intra-book internal links
+    doc.querySelectorAll('a[href]').forEach((a) => {
+      const href = a.getAttribute('href')
+      if (!href || href.startsWith('#') || href.startsWith('javascript:')) return
+      try {
+        const parsed = new URL(href, ch.url || window.location?.origin || 'https://localhost')
+        const norm = normaliseUrl(parsed.toString())
+        if (urlToChapter.has(norm)) {
+          const targetFile = urlToChapter.get(norm)
+          const fragment = parsed.hash || ''
+          a.setAttribute('href', `${targetFile}${fragment}`)
+        }
+      } catch {}
+    })
+
     const bodyContent = doc.body.innerHTML || ''
 
+    // Standard EPUB3 XHTML format with epub namespace
     const xhtmlContent = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="en">
 <head>
   <meta charset="utf-8" />
   <title>${escapeXml(chTitle)}</title>
@@ -289,6 +494,7 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
       <navLabel><text>${escapeXml(chTitle)}</text></navLabel>
       <content src="${filename}"/>
     </navPoint>`)
+    navListItems.push(`      <li><a href="${filename}">${escapeXml(chTitle)}</a></li>`)
   })
 
   // Add all downloaded images to manifest
@@ -301,7 +507,33 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
     }
   }
 
-  // 6. OEBPS/toc.ncx (Kindle TOC)
+  // 7. OEBPS/nav.xhtml (Standard EPUB3 Navigation Document)
+  const navXhtml = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Table of Contents</title>
+  <link rel="stylesheet" type="text/css" href="style.css" />
+</head>
+<body>
+  <nav epub:type="toc" id="toc">
+    <h1>Table of Contents</h1>
+    <ol>
+${navListItems.join('\n')}
+    </ol>
+  </nav>
+  <nav epub:type="landmarks" id="landmarks" hidden="hidden">
+    <h2>Landmarks</h2>
+    <ol>
+      <li><a epub:type="bodymatter" href="chapter_0.xhtml">Start of Reading</a></li>
+    </ol>
+  </nav>
+</body>
+</html>`
+  oebps.file('nav.xhtml', navXhtml)
+
+  // 8. OEBPS/toc.ncx (EPUB2 backward compatibility for Crengine in KOReader)
   const tocNcx = `<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head>
@@ -318,16 +550,18 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
 </ncx>`
   oebps.file('toc.ncx', tocNcx)
 
-  // 7. OEBPS/content.opf
+  // 9. OEBPS/content.opf (Standard EPUB3 Package Document)
   const contentOpf = `<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookID" version="2.0">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookID" xml:lang="en">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="BookID">${bookId}</dc:identifier>
     <dc:title>${escapeXml(bookTitle)}</dc:title>
-    <dc:creator opf:role="aut">${escapeXml(bookAuthor)}</dc:creator>
+    <dc:creator>${escapeXml(bookAuthor)}</dc:creator>
     <dc:language>en</dc:language>
-    <dc:identifier id="BookID" opf:scheme="UUID">${bookId}</dc:identifier>
+    <meta property="dcterms:modified">${isoDate}</meta>
   </metadata>
   <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
     <item id="style" href="style.css" media-type="text/css"/>
     ${manifestItems.join('\n    ')}
@@ -338,8 +572,8 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
 </package>`
   oebps.file('content.opf', contentOpf)
 
-  // 8. Generate binary EPUB blob
-  console.log('[epubGenerator] Compacting EPUB archive...')
+  // 10. Generate binary EPUB blob
+  console.log('[epubGenerator] Packaging KOReader EPUB3 archive...')
   const blob = await zip.generateAsync({
     type: 'blob',
     mimeType: 'application/epub+zip',

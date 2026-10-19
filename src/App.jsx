@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { Capacitor } from '@capacitor/core'
 import { generateEpubBlob } from './epubGenerator'
 import { parsePdfClient } from './clientPdfExtractor'
@@ -10,7 +10,8 @@ const STATUS_LABELS = {
   queued: 'Queued',
   crawling: 'Crawling pages…',
   extracting: 'Extracting content…',
-  building: 'Building EPUB…',
+  toc_preview: 'Table of Contents Customizer',
+  building: 'Compiling KOReader EPUB3…',
   done: 'Done!',
   error: 'Error',
 }
@@ -19,6 +20,7 @@ const STATUS_COLORS = {
   queued: 'bg-gray-100 text-gray-600',
   crawling: 'bg-blue-100 text-blue-700',
   extracting: 'bg-purple-100 text-purple-700',
+  toc_preview: 'bg-indigo-100 text-indigo-700',
   building: 'bg-yellow-100 text-yellow-700',
   done: 'bg-green-100 text-green-700',
   error: 'bg-red-100 text-red-700',
@@ -27,7 +29,7 @@ const STATUS_COLORS = {
 function ProgressBar({ value, max }) {
   const pct = max > 0 ? Math.min(100, Math.round((value / max) * 100)) : 0
   return (
-    <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+    <div className="w-full bg-slate-700 rounded-full h-3 overflow-hidden">
       <div
         className="h-3 rounded-full bg-green-500 transition-all duration-300"
         style={{ width: `${pct}%` }}
@@ -39,14 +41,14 @@ function ProgressBar({ value, max }) {
 const EXAMPLES = [
   { label: 'GFG System Design', url: 'https://www.geeksforgeeks.org/system-design/getting-started-with-system-design/' },
   { label: 'GFG DSA Tutorial', url: 'https://www.geeksforgeeks.org/dsa/dsa-tutorial-learn-data-structures-and-algorithms/' },
-  { label: 'Wikipedia System Design', url: 'https://en.wikipedia.org/wiki/Systems_design' },
+  { label: 'Wikipedia Systems Design', url: 'https://en.wikipedia.org/wiki/Systems_design' },
 ]
 
 export default function App() {
   const isNative = Capacitor.isNativePlatform()
 
   const [mode, setMode] = useState('web') // 'web' | 'pdf'
-  const [crawlScope, setCrawlScope] = useState('crawl') // 'crawl' (up to 200) | 'single'
+  const [crawlScope, setCrawlScope] = useState('crawl') // 'crawl' | 'single'
   const [engineMode, setEngineMode] = useState(isNative ? 'native' : 'auto') // 'native' | 'server' | 'auto'
   const [serverUrl, setServerUrl] = useState('')
   const [showSettings, setShowSettings] = useState(false)
@@ -59,6 +61,11 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef(null)
 
+  // TOC Preview & Customization State
+  const [tocChapters, setTocChapters] = useState([])
+  const [customBookTitle, setCustomBookTitle] = useState('')
+  const [customAuthor, setCustomAuthor] = useState('')
+
   const [jobId, setJobId] = useState(null)
   const [downloadBlob, setDownloadBlob] = useState(null)
   const [downloadUrl, setDownloadUrl] = useState(null)
@@ -69,6 +76,23 @@ export default function App() {
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
   const eventSourceRef = useRef(null)
+
+  // Listen to incoming Android Share Sheet URLs
+  useEffect(() => {
+    if (window.__INITIAL_SHARED_URL__) {
+      setUrl(window.__INITIAL_SHARED_URL__)
+    }
+    const handleShare = (e) => {
+      if (e.detail) setUrl(e.detail)
+    }
+    window.addEventListener('incomingSharedUrl', handleShare)
+    window.handleIncomingShare = (sharedUrl) => {
+      if (sharedUrl) setUrl(sharedUrl)
+    }
+    return () => {
+      window.removeEventListener('incomingSharedUrl', handleShare)
+    }
+  }, [])
 
   const reset = useCallback(() => {
     if (eventSourceRef.current) {
@@ -84,6 +108,9 @@ export default function App() {
     setStatus(null)
     setError(null)
     setLoading(false)
+    setTocChapters([])
+    setCustomBookTitle('')
+    setCustomAuthor('')
   }, [])
 
   const startSSE = useCallback((id, base = '') => {
@@ -106,7 +133,6 @@ export default function App() {
         if (data.filename) setDownloadFilename(data.filename)
         setLoading(false)
         es.close()
-        // Automatically deliver EPUB
         saveAndDeliverEpub(dl, data.filename).then((res) => {
           if (res.message) setDownloadStatusMsg(res.message)
         })
@@ -125,7 +151,7 @@ export default function App() {
     }
   }, [])
 
-  // ── Handle Web / GFG Submit ────────────────────────────────────────────────
+  // ── Handle Web / Directory Crawl Submit ─────────────────────────────────────
   const handleWebSubmit = useCallback(
     async (e) => {
       e.preventDefault()
@@ -139,10 +165,6 @@ export default function App() {
       setStatus('crawling')
 
       const isSingle = crawlScope === 'single'
-
-      // Execution engine routing:
-      // On native Android APK: use in-app engine (backed by Android OkHttp, bypasses browser CORS)
-      // On PC/Web browser: use backend server (/api/crawl) which fetches via Node.js axios without CORS
       const useInApp = isNative ? engineMode !== 'server' : engineMode === 'native'
 
       if (useInApp) {
@@ -156,16 +178,38 @@ export default function App() {
             }
           )
 
+          const isGfg = trimmed.includes('geeksforgeeks.org')
+          const defaultAuthor = isGfg ? 'GeeksForGeeks' : new URL(trimmed).hostname
+          const defaultTitle = sectionName || (isGfg ? 'GeeksForGeeks Guide' : 'eBook')
+
+          // If directory mode with multiple chapters: Show TOC Preview & Customizer
+          if (!isSingle && chapters.length > 1) {
+            setTocChapters(
+              chapters.map((ch, idx) => ({
+                id: idx,
+                title: ch.title || `Chapter ${idx + 1}`,
+                html: ch.html,
+                url: ch.url,
+                selected: true,
+              }))
+            )
+            setCustomBookTitle(defaultTitle)
+            setCustomAuthor(defaultAuthor)
+            setStatus('toc_preview')
+            setLoading(false)
+            return
+          }
+
+          // Single page mode: compile directly
           setStatus('building')
           setProgress({ found: chapters.length, processed: chapters.length, total: chapters.length })
 
-          const isGfg = trimmed.includes('geeksforgeeks.org')
-          const safeName = (sectionName || (isGfg ? 'GeeksForGeeks' : 'Webpage')).replace(/[/\\?%*:|"<>]/g, '').trim().replace(/\s+/g, '-')
-          const finalFilename = isGfg ? `${safeName}-GeeksForGeeks.epub` : `${safeName}.epub`
+          const safeName = defaultTitle.replace(/[/\\?%*:|"<>]/g, '').trim().replace(/\s+/g, '-')
+          const finalFilename = `${safeName}.epub`
 
           const blob = await generateEpubBlob({
-            title: isGfg ? `${sectionName} - GeeksForGeeks` : sectionName,
-            author: isGfg ? 'GeeksForGeeks' : new URL(trimmed).hostname,
+            title: defaultTitle,
+            author: defaultAuthor,
             chapters,
           })
 
@@ -179,7 +223,7 @@ export default function App() {
           const deliverRes = await saveAndDeliverEpub(blob, finalFilename)
           if (deliverRes.message) setDownloadStatusMsg(deliverRes.message)
         } catch (err) {
-          console.error('[App] Crawl & Extract error:', err)
+          console.error('[App] Crawl error:', err)
           setError(err.message || 'Failed to crawl and extract webpage content.')
           setStatus('error')
           setLoading(false)
@@ -189,7 +233,7 @@ export default function App() {
 
       // Backend route (PC browser default or when explicitly selected)
       const apiBase = serverUrl.trim()
-      const crawlEndpoint = apiBase ? `${apiBase.replace(/\/$/, '')}/api/crawl` : '/api/crawl'
+      const crawlEndpoint = apiBase ? `${apiBase.replace(/\/$/, '')}/api/crawl-pages` : '/api/crawl-pages'
 
       try {
         const res = await fetch(crawlEndpoint, {
@@ -203,8 +247,29 @@ export default function App() {
           throw new Error(data.error || 'Failed to start job.')
         }
 
-        setJobId(data.jobId)
-        startSSE(data.jobId, apiBase)
+        const isGfg = trimmed.includes('geeksforgeeks.org')
+        const defaultAuthor = isGfg ? 'GeeksForGeeks' : new URL(trimmed).hostname
+        const defaultTitle = data.sectionName || 'eBook'
+
+        if (!isSingle && data.chapters?.length > 1) {
+          setTocChapters(
+            data.chapters.map((ch, idx) => ({
+              id: idx,
+              title: ch.title || `Chapter ${idx + 1}`,
+              html: ch.html,
+              url: ch.url,
+              selected: true,
+            }))
+          )
+          setCustomBookTitle(defaultTitle)
+          setCustomAuthor(defaultAuthor)
+          setStatus('toc_preview')
+          setLoading(false)
+          return
+        }
+
+        // Single page fallback
+        compileCustomToc(data.chapters, defaultTitle, defaultAuthor)
       } catch (err) {
         console.error('[App] Backend request failed:', err)
         setError(err.message || 'Failed to connect to backend server. Make sure the backend is running on port 3001.')
@@ -212,8 +277,114 @@ export default function App() {
         setLoading(false)
       }
     },
-    [url, crawlScope, reset, startSSE, engineMode, isNative, serverUrl]
+    [url, crawlScope, reset, engineMode, isNative, serverUrl]
   )
+
+  // ── Compile Customized TOC ────────────────────────────────────────────────
+  const compileCustomToc = async (chaptersToCompile, bookTitleArg, authorArg) => {
+    const list = chaptersToCompile || tocChapters.filter((c) => c.selected)
+    if (!list || list.length === 0) {
+      setError('Please select at least one chapter to include in your EPUB.')
+      return
+    }
+
+    setLoading(true)
+    setError(null)
+    setStatus('building')
+    setProgress({ found: list.length, processed: list.length, total: list.length })
+
+    const finalTitle = bookTitleArg || customBookTitle || 'KOReader-Guide'
+    const finalAuthor = authorArg || customAuthor || 'KindleWebpageMaker'
+    const safeName = finalTitle.replace(/[/\\?%*:|"<>]/g, '').trim().replace(/\s+/g, '-')
+    const finalFilename = `${safeName}.epub`
+
+    const useInApp = isNative ? engineMode !== 'server' : engineMode === 'native'
+
+    if (useInApp || !serverUrl) {
+      try {
+        const blob = await generateEpubBlob({
+          title: finalTitle,
+          author: finalAuthor,
+          chapters: list,
+        })
+
+        const blobUrl = URL.createObjectURL(blob)
+        setDownloadBlob(blob)
+        setDownloadUrl(blobUrl)
+        setDownloadFilename(finalFilename)
+        setStatus('done')
+        setLoading(false)
+
+        const deliverRes = await saveAndDeliverEpub(blob, finalFilename)
+        if (deliverRes.message) setDownloadStatusMsg(deliverRes.message)
+      } catch (err) {
+        console.error('[compileCustomToc] In-app build error:', err)
+        setError(err.message || 'Failed to generate EPUB archive.')
+        setStatus('error')
+        setLoading(false)
+      }
+    } else {
+      // Backend compile route
+      const apiBase = serverUrl.trim()
+      const compileEndpoint = apiBase ? `${apiBase.replace(/\/$/, '')}/api/compile-epub` : '/api/compile-epub'
+
+      try {
+        const res = await fetch(compileEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: finalTitle,
+            author: finalAuthor,
+            chapters: list,
+          }),
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || 'Backend compilation failed.')
+
+        const dl = apiBase ? `${apiBase.replace(/\/$/, '')}${data.downloadUrl}` : data.downloadUrl
+        setDownloadUrl(dl)
+        setDownloadFilename(data.filename || finalFilename)
+        setStatus('done')
+        setLoading(false)
+
+        saveAndDeliverEpub(dl, data.filename || finalFilename).then((r) => {
+          if (r.message) setDownloadStatusMsg(r.message)
+        })
+      } catch (err) {
+        console.error('[compileCustomToc] Backend error:', err)
+        setError(err.message || 'Failed to compile via backend.')
+        setStatus('error')
+        setLoading(false)
+      }
+    }
+  }
+
+  // TOC Reordering Helpers
+  const moveChapter = (index, direction) => {
+    const newIdx = index + direction
+    if (newIdx < 0 || newIdx >= tocChapters.length) return
+    const updated = [...tocChapters]
+    const temp = updated[index]
+    updated[index] = updated[newIdx]
+    updated[newIdx] = temp
+    setTocChapters(updated)
+  }
+
+  const toggleChapterSelection = (index) => {
+    const updated = [...tocChapters]
+    updated[index].selected = !updated[index].selected
+    setTocChapters(updated)
+  }
+
+  const selectAllChapters = (select) => {
+    setTocChapters(tocChapters.map((c) => ({ ...c, selected: select })))
+  }
+
+  const updateChapterTitle = (index, newTitle) => {
+    const updated = [...tocChapters]
+    updated[index].title = newTitle
+    setTocChapters(updated)
+  }
 
   // ── Handle PDF Submit ─────────────────────────────────────────────────────
   const handlePdfSubmit = useCallback(
@@ -230,7 +401,6 @@ export default function App() {
       setError(null)
       setStatus('extracting')
 
-      // Process PDF directly in-app
       if (pdfFile && (engineMode === 'native' || isNative || !serverUrl)) {
         try {
           const arrayBuffer = await pdfFile.arrayBuffer()
@@ -249,8 +419,8 @@ export default function App() {
           const finalFilename = `${safeTitle}.epub`
 
           const blob = await generateEpubBlob({
-            title,
-            author,
+            title: title || fallbackTitle,
+            author: author || 'KindleWebpageMaker',
             chapters,
           })
 
@@ -263,49 +433,35 @@ export default function App() {
 
           const deliverRes = await saveAndDeliverEpub(blob, finalFilename)
           if (deliverRes.message) setDownloadStatusMsg(deliverRes.message)
-          return
-        } catch (clientErr) {
-          console.warn('In-app PDF parse failed, trying server...', clientErr)
-          if (!serverUrl && !isNative) {
-            // pass
-          } else {
-            setError(clientErr.message || 'Failed to process PDF.')
-            setStatus('error')
-            setLoading(false)
-            return
-          }
+        } catch (err) {
+          console.error('[App] Client PDF parse error:', err)
+          setError(err.message || 'Failed to parse PDF document in browser/app.')
+          setStatus('error')
+          setLoading(false)
         }
+        return
       }
 
-      // Backend route
+      // Backend route for PDF
       const apiBase = serverUrl.trim()
       const convertEndpoint = apiBase ? `${apiBase.replace(/\/$/, '')}/api/convert-pdf` : '/api/convert-pdf'
 
       try {
         const formData = new FormData()
-        if (pdfFile) {
-          formData.append('file', pdfFile)
-        } else {
-          formData.append('url', pdfUrl.trim())
-        }
-
+        if (pdfFile) formData.append('file', pdfFile)
+        if (pdfUrl.trim()) formData.append('url', pdfUrl.trim())
         if (pdfTitle.trim()) formData.append('title', pdfTitle.trim())
         if (pdfAuthor.trim()) formData.append('author', pdfAuthor.trim())
 
-        const res = await fetch(convertEndpoint, {
-          method: 'POST',
-          body: formData,
-        })
+        const res = await fetch(convertEndpoint, { method: 'POST', body: formData })
         const data = await res.json()
-
-        if (!res.ok) {
-          throw new Error(data.error || 'Failed to start PDF conversion.')
-        }
+        if (!res.ok) throw new Error(data.error || 'Failed to start PDF conversion.')
 
         setJobId(data.jobId)
         startSSE(data.jobId, apiBase)
       } catch (err) {
-        setError(err.message)
+        console.error('[App] PDF backend request failed:', err)
+        setError(err.message || 'Failed to connect to backend server.')
         setStatus('error')
         setLoading(false)
       }
@@ -313,189 +469,156 @@ export default function App() {
     [pdfFile, pdfUrl, pdfTitle, pdfAuthor, reset, startSSE, engineMode, isNative, serverUrl]
   )
 
-  const handleDragOver = (e) => {
-    e.preventDefault()
-    setIsDragging(true)
-  }
-
-  const handleDragLeave = () => {
-    setIsDragging(false)
-  }
-
-  const handleDrop = (e) => {
-    e.preventDefault()
-    setIsDragging(false)
-    if (e.dataTransfer.files?.[0]) {
-      const file = e.dataTransfer.files[0]
-      if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
-        setPdfFile(file)
-        if (!pdfTitle) setPdfTitle(file.name.replace(/\.pdf$/i, ''))
-      } else {
-        setError('Please drop a valid .pdf file.')
-      }
-    }
-  }
-
   const progressPct =
-    progress && (progress.total || progress.found)
-      ? Math.min(100, Math.round((progress.processed / (progress.total || progress.found || 1)) * 100))
+    progress && (progress.total || progress.found) > 0
+      ? Math.min(100, Math.round((progress.processed / (progress.total || progress.found)) * 100))
       : 0
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans select-none">
+    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
       {/* Header */}
-      <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-10 px-4 py-3.5">
-        <div className="max-w-2xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <span className="text-2xl">📚</span>
+      <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-10 px-4 py-3">
+        <div className="max-w-4xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-2xl">📖</span>
             <div>
-              <h1 className="text-base sm:text-lg font-bold leading-tight flex items-center gap-2">
-                KindleWebpageMaker
-                <span className="text-[10px] bg-green-500/20 text-green-400 border border-green-500/30 px-1.5 py-0.5 rounded font-mono">
-                  {isNative ? 'Android APK' : 'Web/PC'}
+              <h1 className="font-bold text-base sm:text-lg leading-tight tracking-tight flex items-center gap-2">
+                <span>KindleWebpageMaker</span>
+                <span className="text-xs bg-slate-800 text-green-400 font-mono px-2 py-0.5 rounded border border-green-500/30">
+                  KOReader E-Ink Edition
                 </span>
               </h1>
-              <p className="text-slate-400 text-xs hidden sm:block">
-                Convert GeeksForGeeks, Webpages & PDFs to Kindle EPUBs
+              <p className="text-xs text-slate-400 hidden sm:block">
+                High-contrast monochrome EPUB3 generator for offline reading on jailbroken E-ink Kindles
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={() => setShowSettings(!showSettings)}
-              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm border border-slate-700 transition"
-              title="Settings"
+              className="text-xs text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-700 transition-colors flex items-center gap-1.5"
             >
-              ⚙️
+              <span>⚙️</span>
+              <span className="hidden sm:inline">Settings</span>
             </button>
           </div>
         </div>
       </header>
 
-      {/* Settings Modal */}
-      {showSettings && (
-        <div className="bg-slate-850 border-b border-slate-700 p-4 max-w-2xl mx-auto w-full text-xs animate-in slide-in-from-top duration-200">
-          <div className="flex justify-between items-center mb-3">
-            <span className="font-bold text-slate-200 uppercase tracking-wide">Engine Settings</span>
-            <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-white">✕</button>
-          </div>
-          <div className="space-y-3">
-            <div>
-              <span className="font-semibold text-slate-300 block mb-1">Execution Engine:</span>
-              <div className="flex gap-2">
+      {/* Main Container */}
+      <main className="flex-1 px-4 py-6 sm:py-8">
+        <div className="max-w-4xl mx-auto space-y-6">
+          {/* Settings Drawer */}
+          {showSettings && (
+            <div className="bg-slate-800/90 rounded-2xl border border-slate-700 p-5 space-y-4 animate-in fade-in duration-200">
+              <div className="flex items-center justify-between border-b border-slate-700 pb-2">
+                <h3 className="font-semibold text-sm flex items-center gap-2 text-slate-200">
+                  <span>⚙️</span> Engine & Conversion Settings
+                </h3>
                 <button
-                  type="button"
-                  onClick={() => setEngineMode('native')}
-                  className={`px-3 py-1.5 rounded border text-xs ${
-                    engineMode === 'native'
-                      ? 'bg-green-600 border-green-500 text-white font-medium'
-                      : 'bg-slate-800 border-slate-700 text-slate-400'
-                  }`}
+                  onClick={() => setShowSettings(false)}
+                  className="text-xs text-slate-400 hover:text-slate-200"
                 >
-                  ⚡ 100% In-App (No Server)
+                  ✕ Close
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setEngineMode('server')}
-                  className={`px-3 py-1.5 rounded border text-xs ${
-                    engineMode === 'server'
-                      ? 'bg-green-600 border-green-500 text-white font-medium'
-                      : 'bg-slate-800 border-slate-700 text-slate-400'
-                  }`}
-                >
-                  🖥️ Connect to PC Server
-                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                <div>
+                  <label className="block text-slate-400 mb-1 font-medium">Execution Engine:</label>
+                  <select
+                    value={engineMode}
+                    onChange={(e) => setEngineMode(e.target.value)}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  >
+                    <option value="auto">Auto (Native App / Direct)</option>
+                    <option value="native">In-App Engine (100% Offline / No Server)</option>
+                    <option value="server">Remote Backend Server</option>
+                  </select>
+                  <p className="text-slate-500 mt-1">
+                    In-app mode executes entirely on your device with high-contrast grayscale image processing.
+                  </p>
+                </div>
+
+                {engineMode === 'server' && (
+                  <div>
+                    <label className="block text-slate-400 mb-1 font-medium">Backend Server URL:</label>
+                    <input
+                      type="text"
+                      value={serverUrl}
+                      onChange={(e) => setServerUrl(e.target.value)}
+                      placeholder="http://192.168.1.50:3001"
+                      className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:ring-2 focus:ring-green-500 font-mono"
+                    />
+                  </div>
+                )}
               </div>
             </div>
+          )}
 
-            {engineMode === 'server' && (
-              <div>
-                <span className="font-semibold text-slate-300 block mb-1">PC Server URL:</span>
-                <input
-                  type="text"
-                  value={serverUrl}
-                  onChange={(e) => setServerUrl(e.target.value)}
-                  placeholder="http://192.168.1.50:3001"
-                  className="w-full bg-slate-700 border border-slate-600 rounded px-2.5 py-1 text-xs text-white"
-                />
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Main Content */}
-      <main className="flex-1 flex items-start justify-center px-4 py-6 sm:py-10">
-        <div className="w-full max-w-2xl space-y-6">
-
-          {/* Mode Switcher Tabs */}
-          <div className="flex bg-slate-800/80 p-1.5 rounded-xl border border-slate-700 shadow-lg">
+          {/* Mode Tabs */}
+          <div className="flex bg-slate-800/80 p-1 rounded-xl border border-slate-700">
             <button
-              type="button"
-              onClick={() => { reset(); setMode('web'); }}
-              disabled={loading}
-              className={`flex-1 py-2.5 px-3 sm:px-4 rounded-lg font-medium text-xs sm:text-sm transition-all flex items-center justify-center gap-1.5 ${
-                mode === 'web'
-                  ? 'bg-green-600 text-white shadow-md'
-                  : 'text-slate-400 hover:text-slate-200'
+              onClick={() => { setMode('web'); reset() }}
+              className={`flex-1 py-2 px-3 text-xs sm:text-sm font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 ${
+                mode === 'web' ? 'bg-green-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <span>🌐</span> Web & GFG
+              <span>🌐</span>
+              <span>Web / Documentation</span>
             </button>
             <button
-              type="button"
-              onClick={() => { reset(); setMode('pdf'); }}
-              disabled={loading}
-              className={`flex-1 py-2.5 px-3 sm:px-4 rounded-lg font-medium text-xs sm:text-sm transition-all flex items-center justify-center gap-1.5 ${
-                mode === 'pdf'
-                  ? 'bg-green-600 text-white shadow-md'
-                  : 'text-slate-400 hover:text-slate-200'
+              onClick={() => { setMode('pdf'); reset() }}
+              className={`flex-1 py-2 px-3 text-xs sm:text-sm font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 ${
+                mode === 'pdf' ? 'bg-green-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <span>📄</span> PDF to EPUB
+              <span>📄</span>
+              <span>PDF Document</span>
             </button>
           </div>
 
-          {/* Main Card */}
-          <div className="bg-slate-800 rounded-2xl shadow-2xl p-6 sm:p-8 border border-slate-700">
+          {/* Input Card */}
+          <div className="bg-slate-800 rounded-2xl shadow-xl p-5 sm:p-7 border border-slate-700">
             {mode === 'web' ? (
               <>
-                <div className="mb-5">
+                <div className="mb-4">
                   <h2 className="text-base sm:text-lg font-semibold mb-1 flex items-center gap-2">
-                    <span>🌐</span> Convert Webpages & GFG to EPUB
+                    <span>📚</span> Convert Webpage or Full Guide to EPUB3
                   </h2>
                   <p className="text-slate-400 text-xs sm:text-sm">
-                    Enter any GeeksForGeeks topic URL or ANY website article (Wikipedia, technical blogs, documentation).
-                    We extract clean text, code, and diagrams into a Kindle-ready ebook.
+                    Enter any documentation topic or individual article. Formatted with monochrome E-ink typography,
+                    definition-card wide tables, popup footnote semantics, and high-contrast grayscale imagery.
                   </p>
                 </div>
 
                 {/* Scope selector */}
-                <div className="flex items-center gap-3 mb-4 bg-slate-700/40 p-1.5 rounded-lg border border-slate-700">
-                  <span className="text-xs text-slate-400 pl-2">Mode:</span>
-                  <button
-                    type="button"
-                    onClick={() => setCrawlScope('crawl')}
-                    className={`text-xs px-3 py-1.5 rounded-md font-medium transition ${
-                      crawlScope === 'crawl'
-                        ? 'bg-green-600 text-white shadow'
-                        : 'text-slate-300 hover:text-white'
-                    }`}
-                  >
-                    📚 Crawl Full Topic / Section (All Pages)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCrawlScope('single')}
-                    className={`text-xs px-3 py-1.5 rounded-md font-medium transition ${
-                      crawlScope === 'single'
-                        ? 'bg-green-600 text-white shadow'
-                        : 'text-slate-300 hover:text-white'
-                    }`}
-                  >
-                    📄 Single Page Only
-                  </button>
+                <div className="flex gap-4 mb-4 text-xs sm:text-sm">
+                  <label className="flex items-center gap-2 cursor-pointer text-slate-300">
+                    <input
+                      type="radio"
+                      name="crawlScope"
+                      value="crawl"
+                      checked={crawlScope === 'crawl'}
+                      onChange={() => setCrawlScope('crawl')}
+                      className="accent-green-500"
+                    />
+                    <span className="font-medium">Multi-Page / Directory Mode</span>
+                    <span className="text-xs text-slate-500 hidden sm:inline">(Crawls all sub-pages with TOC customizer)</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer text-slate-300">
+                    <input
+                      type="radio"
+                      name="crawlScope"
+                      value="single"
+                      checked={crawlScope === 'single'}
+                      onChange={() => setCrawlScope('single')}
+                      className="accent-green-500"
+                    />
+                    <span className="font-medium">Single Article Only</span>
+                  </label>
                 </div>
 
                 <form onSubmit={handleWebSubmit} className="space-y-4">
@@ -504,7 +627,7 @@ export default function App() {
                       type="url"
                       value={url}
                       onChange={(e) => setUrl(e.target.value)}
-                      placeholder="https://www.geeksforgeeks.org/system-design/ or https://en.wikipedia.org/wiki/..."
+                      placeholder="https://www.geeksforgeeks.org/system-design/getting-started-with-system-design/"
                       required
                       disabled={loading}
                       className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-4 py-2.5 text-sm
@@ -517,11 +640,13 @@ export default function App() {
                       className="bg-green-600 hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed
                                  text-white font-semibold px-5 py-2.5 rounded-lg text-sm transition-colors whitespace-nowrap"
                     >
-                      {loading ? (crawlScope === 'crawl' ? 'Crawling…' : 'Extracting…') : 'Convert to EPUB'}
+                      {loading
+                        ? (crawlScope === 'crawl' ? 'Scanning Pages…' : 'Extracting…')
+                        : (crawlScope === 'crawl' ? 'Scan & Review TOC' : 'Generate EPUB')}
                     </button>
                   </div>
 
-                  {/* Example chips */}
+                  {/* Examples */}
                   <div className="flex flex-wrap items-center gap-2 pt-1">
                     <span className="text-slate-500 text-xs">Examples:</span>
                     {EXAMPLES.map((ex) => (
@@ -543,30 +668,22 @@ export default function App() {
                 </form>
               </>
             ) : (
+              /* PDF mode */
               <>
-                <div className="mb-5">
+                <div className="mb-4">
                   <h2 className="text-base sm:text-lg font-semibold mb-1 flex items-center gap-2">
-                    <span>📄</span> Convert PDF Document to EPUB
+                    <span>📄</span> Convert PDF Document to EPUB3
                   </h2>
                   <p className="text-slate-400 text-xs sm:text-sm">
-                    Upload any PDF (book, paper, tutorial). We will extract text, format code and lists,
-                    organize it into readable chapters, and generate a Kindle-ready EPUB.
+                    Upload any PDF document. Converts into reflowable, clean monochrome EPUB3 ready for KOReader.
                   </p>
                 </div>
 
                 <form onSubmit={handlePdfSubmit} className="space-y-4">
-                  {/* File Dropzone */}
                   <div
-                    onDragOver={handleDragOver}
-                    onDragLeave={handleDragLeave}
-                    onDrop={handleDrop}
                     onClick={() => fileInputRef.current?.click()}
                     className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors ${
-                      isDragging
-                        ? 'border-green-500 bg-green-500/10'
-                        : pdfFile
-                        ? 'border-green-600/60 bg-slate-700/50'
-                        : 'border-slate-600 hover:border-slate-500 bg-slate-700/30'
+                      pdfFile ? 'border-green-600/60 bg-slate-700/50' : 'border-slate-600 hover:border-slate-500 bg-slate-700/30'
                     }`}
                   >
                     <input
@@ -600,87 +717,167 @@ export default function App() {
                             e.stopPropagation()
                             setPdfFile(null)
                           }}
-                          className="text-xs text-red-400 hover:text-red-300 px-3 py-1 bg-red-900/30 rounded border border-red-800"
+                          className="text-xs text-red-400 hover:text-red-300 px-2 py-1"
                         >
                           Remove
                         </button>
                       </div>
                     ) : (
-                      <div className="space-y-1">
-                        <div className="text-3xl mb-2">📥</div>
-                        <p className="text-sm font-medium text-slate-300">
-                          Tap to select or drop your PDF here
-                        </p>
-                        <p className="text-xs text-slate-500">Supports documents, papers, and books up to 100MB</p>
+                      <div>
+                        <span className="text-3xl block mb-2">📁</span>
+                        <div className="text-sm font-medium text-slate-300">Tap to choose PDF document</div>
+                        <div className="text-xs text-slate-500 mt-1">Processed locally on your device</div>
                       </div>
                     )}
                   </div>
 
-                  {/* Or PDF URL */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 mb-1">
-                      Or paste a public PDF URL:
-                    </label>
-                    <input
-                      type="url"
-                      value={pdfUrl}
-                      onChange={(e) => setPdfUrl(e.target.value)}
-                      placeholder="https://arxiv.org/pdf/2301.00001.pdf"
-                      disabled={loading || !!pdfFile}
-                      className="w-full bg-slate-700/70 border border-slate-600 rounded-lg px-3 py-2 text-xs
-                                 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-green-500
-                                 disabled:opacity-50"
-                    />
-                  </div>
-
-                  {/* Title & Author */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-400 mb-1">
-                        Ebook Title (Optional):
-                      </label>
-                      <input
-                        type="text"
-                        value={pdfTitle}
-                        onChange={(e) => setPdfTitle(e.target.value)}
-                        placeholder="Custom Title"
-                        disabled={loading}
-                        className="w-full bg-slate-700/70 border border-slate-600 rounded-lg px-3 py-2 text-xs
-                                   placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-green-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-400 mb-1">
-                        Author Name (Optional):
-                      </label>
-                      <input
-                        type="text"
-                        value={pdfAuthor}
-                        onChange={(e) => setPdfAuthor(e.target.value)}
-                        placeholder="Author"
-                        disabled={loading}
-                        className="w-full bg-slate-700/70 border border-slate-600 rounded-lg px-3 py-2 text-xs
-                                   placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-green-500"
-                      />
-                    </div>
-                  </div>
-
                   <button
                     type="submit"
-                    disabled={loading || (!pdfFile && !pdfUrl.trim())}
-                    className="w-full bg-green-600 hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed
-                               text-white font-semibold py-2.5 rounded-lg text-sm transition-colors mt-2"
+                    disabled={loading || !pdfFile}
+                    className="w-full bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white font-semibold py-2.5 rounded-lg text-sm transition-colors mt-2"
                   >
-                    {loading ? 'Processing PDF…' : 'Convert PDF to EPUB'}
+                    {loading ? 'Processing PDF…' : 'Convert PDF to KOReader EPUB'}
                   </button>
                 </form>
               </>
             )}
           </div>
 
-          {/* Progress Card */}
-          {status && (
-            <div className="bg-slate-800 rounded-2xl shadow-2xl p-6 sm:p-8 border border-slate-700 space-y-5 animate-in fade-in duration-300">
+          {/* Table of Contents Preview & Customizer */}
+          {status === 'toc_preview' && tocChapters.length > 0 && (
+            <div className="bg-slate-800 rounded-2xl shadow-xl p-5 sm:p-7 border border-indigo-500/40 space-y-5 animate-in fade-in duration-300">
+              <div className="border-b border-slate-700 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-base sm:text-lg font-bold text-slate-100 flex items-center gap-2">
+                    <span>📑</span> Table of Contents Preview & Customization
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Reorder chapters, edit titles, or uncheck pages you don't want to read.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => selectAllChapters(true)}
+                    className="text-indigo-400 hover:text-indigo-300 underline"
+                  >
+                    Select All
+                  </button>
+                  <span className="text-slate-600">•</span>
+                  <button
+                    type="button"
+                    onClick={() => selectAllChapters(false)}
+                    className="text-slate-400 hover:text-slate-300 underline"
+                  >
+                    Deselect All
+                  </button>
+                </div>
+              </div>
+
+              {/* Book Metadata overrides */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-900/60 p-3.5 rounded-xl border border-slate-700/60 text-xs">
+                <div>
+                  <label className="block text-slate-400 mb-1 font-medium">Book Title:</label>
+                  <input
+                    type="text"
+                    value={customBookTitle}
+                    onChange={(e) => setCustomBookTitle(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-slate-200"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1 font-medium">Author Name:</label>
+                  <input
+                    type="text"
+                    value={customAuthor}
+                    onChange={(e) => setCustomAuthor(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-slate-200"
+                  />
+                </div>
+              </div>
+
+              {/* Chapter List */}
+              <div className="max-h-96 overflow-y-auto space-y-2 pr-1 divide-y divide-slate-700/40">
+                {tocChapters.map((ch, idx) => (
+                  <div
+                    key={ch.id}
+                    className={`pt-2 flex items-center gap-2 sm:gap-3 p-2 rounded-lg transition-colors ${
+                      ch.selected ? 'bg-slate-700/30 hover:bg-slate-700/50' : 'opacity-40 bg-slate-900/40'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={ch.selected}
+                      onChange={() => toggleChapterSelection(idx)}
+                      className="accent-green-500 w-4 h-4 cursor-pointer"
+                    />
+
+                    <span className="text-xs font-mono text-slate-500 w-6 text-right">
+                      {idx + 1}.
+                    </span>
+
+                    <input
+                      type="text"
+                      value={ch.title}
+                      onChange={(e) => updateChapterTitle(idx, e.target.value)}
+                      className="flex-1 bg-slate-800 border border-slate-600 rounded px-2.5 py-1 text-xs text-slate-200 focus:ring-1 focus:ring-green-500"
+                    />
+
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => moveChapter(idx, -1)}
+                        disabled={idx === 0}
+                        title="Move Up"
+                        className="px-2 py-1 text-xs bg-slate-800 hover:bg-slate-700 rounded border border-slate-600 disabled:opacity-30"
+                      >
+                        ▲
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => moveChapter(idx, 1)}
+                        disabled={idx === tocChapters.length - 1}
+                        title="Move Down"
+                        className="px-2 py-1 text-xs bg-slate-800 hover:bg-slate-700 rounded border border-slate-600 disabled:opacity-30"
+                      >
+                        ▼
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Action buttons */}
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
+                <span className="text-xs text-slate-400">
+                  {tocChapters.filter((c) => c.selected).length} of {tocChapters.length} chapters selected
+                </span>
+
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  <button
+                    type="button"
+                    onClick={reset}
+                    className="flex-1 sm:flex-initial px-4 py-2 text-xs text-slate-400 hover:text-slate-200 bg-slate-800 rounded-lg border border-slate-700"
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => compileCustomToc()}
+                    disabled={tocChapters.filter((c) => c.selected).length === 0}
+                    className="flex-1 sm:flex-initial bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white font-semibold px-6 py-2.5 rounded-lg text-sm transition-colors shadow-lg shadow-green-900/30"
+                  >
+                    Compile KOReader EPUB ({tocChapters.filter((c) => c.selected).length} Chapters)
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Live Progress Card */}
+          {status && status !== 'toc_preview' && (
+            <div className="bg-slate-800 rounded-2xl shadow-xl p-5 sm:p-7 border border-slate-700 space-y-4 animate-in fade-in duration-300">
               <div className="flex items-center justify-between">
                 <span
                   className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1 rounded-full ${
@@ -693,46 +890,36 @@ export default function App() {
                   {STATUS_LABELS[status] || status}
                 </span>
                 {jobId && (
-                  <span className="text-slate-500 text-xs font-mono">
-                    Job: {jobId.slice(0, 8)}…
-                  </span>
+                  <span className="text-slate-500 text-xs font-mono">Job: {jobId.slice(0, 8)}…</span>
                 )}
               </div>
 
-              {/* Progress bar + stats */}
               {progress && status !== 'error' && (
                 <div className="space-y-2">
                   <ProgressBar value={progress.processed} max={progress.total || progress.found || 1} />
                   <div className="flex justify-between text-xs text-slate-400">
                     <span>
-                      {mode === 'pdf'
-                        ? status === 'extracting'
-                          ? `Extracting and structuring pages (${progress.processed}/${progress.total})...`
-                          : status === 'building'
-                          ? 'Generating Kindle EPUB...'
-                          : `Total Pages: ${progress.found}`
-                        : status === 'crawling'
-                        ? `Found ${progress.found} pages, crawled ${progress.processed}`
-                        : `Processed ${progress.processed} / ${progress.total} pages`}
+                      {status === 'crawling'
+                        ? `Discovered ${progress.found} pages, crawled ${progress.processed}`
+                        : `Processing ${progress.processed} / ${progress.total || progress.found} pages`}
                     </span>
                     <span>{progressPct}%</span>
                   </div>
                 </div>
               )}
 
-              {/* Error */}
               {error && (
                 <div className="bg-red-900/40 border border-red-700 rounded-lg px-4 py-3 text-sm text-red-300">
                   <strong>Error:</strong> {error}
                 </div>
               )}
 
-              {/* Done — download button */}
+              {/* Done / Download Card */}
               {status === 'done' && (
-                <div className="flex flex-col items-center gap-4 pt-2">
+                <div className="flex flex-col items-center gap-3 pt-2">
                   <div className="text-green-400 text-4xl">✅</div>
-                  <p className="text-slate-300 text-sm text-center">
-                    Your Kindle-ready EPUB is generated!
+                  <p className="text-slate-200 text-sm font-medium text-center">
+                    Your KOReader E-Ink EPUB3 ebook is compiled and ready!
                   </p>
 
                   {downloadStatusMsg && (
@@ -747,11 +934,10 @@ export default function App() {
                       const res = await saveAndDeliverEpub(downloadBlob || downloadUrl, downloadFilename)
                       if (res.message) setDownloadStatusMsg(res.message)
                     }}
-                    className="bg-green-600 hover:bg-green-500 text-white font-semibold px-8 py-3
-                               rounded-lg text-sm transition-colors flex items-center gap-2 shadow-lg hover:shadow-green-500/20 active:scale-95"
+                    className="bg-green-600 hover:bg-green-500 text-white font-semibold px-8 py-3 rounded-lg text-sm transition-colors flex items-center gap-2 shadow-lg shadow-green-900/30 active:scale-95"
                   >
                     <span>{isNative ? '📱' : '⬇️'}</span>
-                    <span>{isNative ? 'Open in Kindle / Save EPUB' : 'Download EPUB'}</span>
+                    <span>{isNative ? 'Save to Downloads / Open in KOReader' : 'Download EPUB'}</span>
                   </button>
 
                   <button
@@ -759,9 +945,8 @@ export default function App() {
                       reset()
                       setUrl('')
                       setPdfFile(null)
-                      setPdfUrl('')
                     }}
-                    className="text-slate-400 hover:text-slate-200 text-sm underline"
+                    className="text-slate-400 hover:text-slate-200 text-xs underline pt-1"
                   >
                     Start a new conversion
                   </button>
@@ -770,47 +955,31 @@ export default function App() {
             </div>
           )}
 
-          {/* How it works info */}
+          {/* E-ink KOReader Feature Info */}
           {!status && (
-            <div className="bg-slate-800/50 rounded-2xl border border-slate-700 p-6">
-              <h3 className="font-semibold text-slate-300 mb-4 flex items-center gap-2">
-                <span>⚡</span> Features & In-App Engine
+            <div className="bg-slate-800/40 rounded-2xl border border-slate-700/60 p-5">
+              <h3 className="font-semibold text-slate-300 text-xs sm:text-sm mb-3 flex items-center gap-2">
+                <span>⚡</span> KOReader on E-Ink Optimizations
               </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-slate-400">
-                <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/60 space-y-1">
-                  <div className="font-semibold text-slate-200 flex items-center gap-1.5">
-                    <span>🌐</span> GeeksForGeeks & Web Crawling
-                  </div>
-                  <div>
-                    Recursively crawls all chapters in a topic (like System Design, DSA) or single article mode.
-                  </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-slate-400">
+                <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/50 space-y-1">
+                  <div className="font-semibold text-slate-200">📊 Responsive Table Handling</div>
+                  <div>Wide tables are automatically converted into readable stacked cards so they never clip on 6" E-ink displays.</div>
                 </div>
 
-                <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/60 space-y-1">
-                  <div className="font-semibold text-slate-200 flex items-center gap-1.5">
-                    <span>📱</span> Direct Kindle Integration
-                  </div>
-                  <div>
-                    Writes directly to Android Documents and opens the Kindle app sharing sheet with 1 tap.
-                  </div>
+                <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/50 space-y-1">
+                  <div className="font-semibold text-slate-200">🔍 Native Popup Footnotes</div>
+                  <div>Semantic EPUB3 <code>noteref</code> tagging triggers native KOReader popup dialogs without losing page position.</div>
                 </div>
 
-                <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/60 space-y-1">
-                  <div className="font-semibold text-slate-200 flex items-center gap-1.5">
-                    <span>📕</span> Offline PDF to EPUB
-                  </div>
-                  <div>
-                    Extracts text and code blocks from local or online PDFs in device memory.
-                  </div>
+                <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/50 space-y-1">
+                  <div className="font-semibold text-slate-200">🖼️ 16-Shade Grayscale Images</div>
+                  <div>Diagrams are converted to high-contrast monochrome JPEG/PNG to render crisp lines on E-ink with fast page turns.</div>
                 </div>
 
-                <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/60 space-y-1">
-                  <div className="font-semibold text-slate-200 flex items-center gap-1.5">
-                    <span>⚡</span> 100% In-App / No Server
-                  </div>
-                  <div>
-                    Powered by native Android OkHttp (CapacitorHttp) to bypass browser CORS on your phone.
-                  </div>
+                <div className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/50 space-y-1">
+                  <div className="font-semibold text-slate-200">🔗 Intra-Book Local Anchors</div>
+                  <div>Cross-page links within documentation guides are rewritten into internal EPUB anchors for 100% offline reading.</div>
                 </div>
               </div>
             </div>
@@ -819,8 +988,8 @@ export default function App() {
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-slate-800 py-4 px-4 text-center text-xs text-slate-500">
-        KindleWebpageMaker • Standalone Native Android App
+      <footer className="border-t border-slate-800 py-3 px-4 text-center text-xs text-slate-500">
+        KindleWebpageMaker • KOReader E-Ink Edition
       </footer>
     </div>
   )
