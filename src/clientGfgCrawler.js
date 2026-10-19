@@ -403,7 +403,13 @@ export async function crawlAndExtractClient(startUrl, options = {}, onProgress =
     .replace(/[-_]/g, ' ')
     .replace(/\b\w/g, (c) => c.toUpperCase())
 
-  onProgress({ status: 'crawling', found: 1, processed: 0, total: 1 })
+  onProgress({
+    status: 'crawling',
+    found: 1,
+    processed: 0,
+    total: 1,
+    message: `Connecting to ${startParsed.hostname}...`,
+  })
 
   let seedHtml = await fetchHtml(startNorm)
   let activeSeedUrl = startNorm
@@ -434,9 +440,21 @@ export async function crawlAndExtractClient(startUrl, options = {}, onProgress =
 
   // If single page mode, just extract this one page
   if (singlePage) {
-    onProgress({ status: 'extracting', found: 1, processed: 0, total: 1 })
+    onProgress({
+      status: 'extracting',
+      found: 1,
+      processed: 0,
+      total: 1,
+      message: 'Extracting article content...',
+    })
     const chapter = extractArticleContent(seedHtml, activeSeedUrl)
-    onProgress({ status: 'extracting', found: 1, processed: 1, total: 1 })
+    onProgress({
+      status: 'extracting',
+      found: 1,
+      processed: 1,
+      total: 1,
+      message: `Extracted: ${chapter.title}`,
+    })
     return {
       sectionName: chapter.title || sectionName,
       chapters: [chapter],
@@ -474,6 +492,7 @@ export async function crawlAndExtractClient(startUrl, options = {}, onProgress =
     found: visited.size,
     processed: 0,
     total: visited.size,
+    message: `Discovered ${visited.size} chapters in section...`,
   })
 
   // --- BFS Loop: Fetch & Discover up to maxLimit (200 pages) ---
@@ -495,6 +514,7 @@ export async function crawlAndExtractClient(startUrl, options = {}, onProgress =
       found: visited.size,
       processed: chapters.length,
       total: visited.size,
+      message: `Extracting ${chapters.length}/${visited.size}: ${chapter?.title || 'Chapter'}`,
     })
 
     // Discover new links from this page to continue BFS crawl up to 200 pages!
@@ -517,6 +537,7 @@ export async function crawlAndExtractClient(startUrl, options = {}, onProgress =
         found: visited.size,
         processed: chapters.length,
         total: visited.size,
+        message: `Discovered ${visited.size} chapters, extracted ${chapters.length}...`,
       })
     }
 

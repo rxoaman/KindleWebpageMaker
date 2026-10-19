@@ -337,12 +337,19 @@ async function processImageForKindle(blob, originalUrl) {
  * Builds a valid, self-contained EPUB3 archive optimized for KOReader on E-ink screens.
  *
  * @param {Object} options
+ * @param {Object} options
  * @param {string} options.title - Book title
  * @param {string} [options.author] - Author name
  * @param {Array<{ title: string, html: string, url?: string }>} options.chapters
+ * @param {Function} [options.onProgress] - Progress callback
  * @returns {Promise<Blob>}
  */
-export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', chapters = [] }) {
+export async function generateEpubBlob({
+  title,
+  author = 'KindleWebpageMaker',
+  chapters = [],
+  onProgress = () => {},
+}) {
   const zip = new JSZip()
   const bookTitle = title || 'eBook'
   const bookAuthor = author || 'KindleWebpageMaker'
@@ -398,6 +405,16 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
   const imageUrls = Array.from(imageMap.keys())
   let savedCount = 0
 
+  onProgress({
+    status: 'building',
+    found: chapters.length,
+    processed: 0,
+    total: imageUrls.length || chapters.length || 1,
+    message: imageUrls.length > 0
+      ? `Found ${imageUrls.length} images to optimize for E-ink...`
+      : 'Packaging EPUB3 chapters...',
+  })
+
   for (let i = 0; i < imageUrls.length; i += 4) {
     const batch = imageUrls.slice(i, i + 4)
     await Promise.all(
@@ -421,6 +438,14 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
         }
       })
     )
+    const curr = Math.min(i + batch.length, imageUrls.length)
+    onProgress({
+      status: 'building',
+      found: imageUrls.length,
+      processed: curr,
+      total: imageUrls.length,
+      message: `Converting images to 16-shade E-ink grayscale (${curr}/${imageUrls.length})...`,
+    })
   }
 
   console.log(`[epubGenerator] Successfully saved ${savedCount} high-contrast E-ink images into OEBPS/images/.`)
@@ -435,6 +460,16 @@ export async function generateEpubBlob({ title, author = 'KindleWebpageMaker', c
     const filename = `chapter_${i}.xhtml`
     const chId = `ch_${i}`
     const chTitle = ch.title || `Chapter ${i + 1}`
+
+    if (i % 5 === 0 || i === chapters.length - 1) {
+      onProgress({
+        status: 'building',
+        found: chapters.length,
+        processed: i + 1,
+        total: chapters.length,
+        message: `Packaging chapter ${i + 1} of ${chapters.length}...`,
+      })
+    }
 
     const doc = parser.parseFromString(ch.html || '', 'text/html')
 
@@ -574,6 +609,13 @@ ${navListItems.join('\n')}
 
   // 10. Generate binary EPUB blob
   console.log('[epubGenerator] Packaging KOReader EPUB3 archive...')
+  onProgress({
+    status: 'building',
+    found: chapters.length,
+    processed: chapters.length,
+    total: chapters.length,
+    message: 'Compressing and finalizing EPUB3 archive...',
+  })
   const blob = await zip.generateAsync({
     type: 'blob',
     mimeType: 'application/epub+zip',

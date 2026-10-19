@@ -26,14 +26,19 @@ const STATUS_COLORS = {
   error: 'bg-red-100 text-red-700',
 }
 
-function ProgressBar({ value, max }) {
+function ProgressBar({ value = 0, max = 1, loading = false }) {
   const pct = max > 0 ? Math.min(100, Math.round((value / max) * 100)) : 0
+  const isIndeterminate = loading && (!max || (value === 0 && max <= 1))
   return (
-    <div className="w-full bg-slate-700 rounded-full h-3 overflow-hidden">
+    <div className="w-full bg-slate-700/80 rounded-full h-3.5 overflow-hidden p-0.5 border border-slate-600/50 shadow-inner">
       <div
-        className="h-3 rounded-full bg-green-500 transition-all duration-300"
-        style={{ width: `${pct}%` }}
-      />
+        className={`h-full rounded-full transition-all duration-300 relative overflow-hidden ${
+          isIndeterminate ? 'w-full bg-gradient-to-r from-green-600 via-green-400 to-emerald-500' : 'bg-green-500'
+        }`}
+        style={isIndeterminate ? {} : { width: `${Math.max(pct, 4)}%` }}
+      >
+        <div className="absolute inset-0 bg-white/25 animate-pulse" />
+      </div>
     </div>
   )
 }
@@ -125,9 +130,39 @@ export default function App() {
 
       if (data.type === 'progress') {
         setStatus(data.status)
-        setProgress({ found: data.found, processed: data.processed, total: data.total })
+        setProgress({
+          found: data.found,
+          processed: data.processed,
+          total: data.total,
+          message: data.message || '',
+        })
+      } else if (data.type === 'toc_ready') {
+        const isGfg = url.includes('geeksforgeeks.org')
+        const defaultAuthor = isGfg ? 'GeeksForGeeks' : (url ? new URL(url).hostname : 'KindleWebpageMaker')
+        const defaultTitle = data.sectionName || (isGfg ? 'GeeksForGeeks Guide' : 'eBook')
+
+        setTocChapters(
+          (data.chapters || []).map((ch, idx) => ({
+            id: ch.id ?? idx,
+            title: ch.title || `Chapter ${idx + 1}`,
+            html: ch.html,
+            url: ch.url,
+            selected: true,
+          }))
+        )
+        setCustomBookTitle(defaultTitle)
+        setCustomAuthor(defaultAuthor)
+        setStatus('toc_preview')
+        setLoading(false)
+        es.close()
       } else if (data.type === 'done') {
         setStatus('done')
+        setProgress((prev) => ({
+          found: prev?.total || 1,
+          processed: prev?.total || 1,
+          total: prev?.total || 1,
+          message: 'EPUB3 ready for KOReader!',
+        }))
         const dl = base ? `${base.replace(/\/$/, '')}/api/download/${id}` : `/api/download/${id}`
         setDownloadUrl(dl)
         if (data.filename) setDownloadFilename(data.filename)
@@ -149,7 +184,7 @@ export default function App() {
       setLoading(false)
       es.close()
     }
-  }, [])
+  }, [url])
 
   // ── Handle Web / Directory Crawl Submit ─────────────────────────────────────
   const handleWebSubmit = useCallback(
@@ -163,6 +198,12 @@ export default function App() {
       setLoading(true)
       setError(null)
       setStatus('crawling')
+      setProgress({
+        found: 1,
+        processed: 0,
+        total: 1,
+        message: 'Connecting to website...',
+      })
 
       const isSingle = crawlScope === 'single'
       const useInApp = isNative ? engineMode !== 'server' : engineMode === 'native'
@@ -172,9 +213,9 @@ export default function App() {
           const { sectionName, chapters } = await crawlAndExtractGfgClient(
             trimmed,
             { singlePage: isSingle },
-            ({ status, found, processed, total }) => {
-              setStatus(status)
-              setProgress({ found, processed, total })
+            ({ status: s, found, processed, total, message }) => {
+              if (s) setStatus(s)
+              setProgress({ found, processed, total, message: message || '' })
             }
           )
 
@@ -202,7 +243,12 @@ export default function App() {
 
           // Single page mode: compile directly
           setStatus('building')
-          setProgress({ found: chapters.length, processed: chapters.length, total: chapters.length })
+          setProgress({
+            found: chapters.length,
+            processed: 0,
+            total: chapters.length,
+            message: 'Localizing images for KOReader...',
+          })
 
           const safeName = defaultTitle.replace(/[/\\?%*:|"<>]/g, '').trim().replace(/\s+/g, '-')
           const finalFilename = `${safeName}.epub`
@@ -211,6 +257,15 @@ export default function App() {
             title: defaultTitle,
             author: defaultAuthor,
             chapters,
+            onProgress: ({ status: s, processed, total, message }) => {
+              if (s) setStatus(s)
+              setProgress({
+                found: total,
+                processed,
+                total,
+                message: message || '',
+              })
+            },
           })
 
           const blobUrl = URL.createObjectURL(blob)
@@ -218,6 +273,12 @@ export default function App() {
           setDownloadUrl(blobUrl)
           setDownloadFilename(finalFilename)
           setStatus('done')
+          setProgress({
+            found: chapters.length,
+            processed: chapters.length,
+            total: chapters.length,
+            message: 'EPUB3 compilation complete!',
+          })
           setLoading(false)
 
           const deliverRes = await saveAndDeliverEpub(blob, finalFilename)
@@ -233,13 +294,17 @@ export default function App() {
 
       // Backend route (PC browser default or when explicitly selected)
       const apiBase = serverUrl.trim()
-      const crawlEndpoint = apiBase ? `${apiBase.replace(/\/$/, '')}/api/crawl-pages` : '/api/crawl-pages'
+      const crawlEndpoint = apiBase ? `${apiBase.replace(/\/$/, '')}/api/crawl` : '/api/crawl'
 
       try {
         const res = await fetch(crawlEndpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: trimmed, singlePage: isSingle }),
+          body: JSON.stringify({
+            url: trimmed,
+            singlePage: isSingle,
+            previewToc: !isSingle,
+          }),
         })
         const data = await res.json()
 
@@ -247,29 +312,8 @@ export default function App() {
           throw new Error(data.error || 'Failed to start job.')
         }
 
-        const isGfg = trimmed.includes('geeksforgeeks.org')
-        const defaultAuthor = isGfg ? 'GeeksForGeeks' : new URL(trimmed).hostname
-        const defaultTitle = data.sectionName || 'eBook'
-
-        if (!isSingle && data.chapters?.length > 1) {
-          setTocChapters(
-            data.chapters.map((ch, idx) => ({
-              id: idx,
-              title: ch.title || `Chapter ${idx + 1}`,
-              html: ch.html,
-              url: ch.url,
-              selected: true,
-            }))
-          )
-          setCustomBookTitle(defaultTitle)
-          setCustomAuthor(defaultAuthor)
-          setStatus('toc_preview')
-          setLoading(false)
-          return
-        }
-
-        // Single page fallback
-        compileCustomToc(data.chapters, defaultTitle, defaultAuthor)
+        setJobId(data.jobId)
+        startSSE(data.jobId, apiBase)
       } catch (err) {
         console.error('[App] Backend request failed:', err)
         setError(err.message || 'Failed to connect to backend server. Make sure the backend is running on port 3001.')
@@ -277,7 +321,7 @@ export default function App() {
         setLoading(false)
       }
     },
-    [url, crawlScope, reset, engineMode, isNative, serverUrl]
+    [url, crawlScope, reset, engineMode, isNative, serverUrl, startSSE]
   )
 
   // ── Compile Customized TOC ────────────────────────────────────────────────
@@ -291,7 +335,12 @@ export default function App() {
     setLoading(true)
     setError(null)
     setStatus('building')
-    setProgress({ found: list.length, processed: list.length, total: list.length })
+    setProgress({
+      found: list.length,
+      processed: 0,
+      total: list.length,
+      message: 'Scanning chapters & localizing images for KOReader...',
+    })
 
     const finalTitle = bookTitleArg || customBookTitle || 'KOReader-Guide'
     const finalAuthor = authorArg || customAuthor || 'KindleWebpageMaker'
@@ -306,6 +355,15 @@ export default function App() {
           title: finalTitle,
           author: finalAuthor,
           chapters: list,
+          onProgress: ({ status: s, processed, total, message }) => {
+            if (s) setStatus(s)
+            setProgress({
+              found: total,
+              processed,
+              total,
+              message: message || '',
+            })
+          },
         })
 
         const blobUrl = URL.createObjectURL(blob)
@@ -313,6 +371,12 @@ export default function App() {
         setDownloadUrl(blobUrl)
         setDownloadFilename(finalFilename)
         setStatus('done')
+        setProgress({
+          found: list.length,
+          processed: list.length,
+          total: list.length,
+          message: 'EPUB3 compilation complete!',
+        })
         setLoading(false)
 
         const deliverRes = await saveAndDeliverEpub(blob, finalFilename)
@@ -324,9 +388,9 @@ export default function App() {
         setLoading(false)
       }
     } else {
-      // Backend compile route
+      // Backend compile route with real-time SSE progress
       const apiBase = serverUrl.trim()
-      const compileEndpoint = apiBase ? `${apiBase.replace(/\/$/, '')}/api/compile-epub` : '/api/compile-epub'
+      const compileEndpoint = apiBase ? `${apiBase.replace(/\/$/, '')}/api/compile-job` : '/api/compile-job'
 
       try {
         const res = await fetch(compileEndpoint, {
@@ -341,15 +405,8 @@ export default function App() {
         const data = await res.json()
         if (!res.ok) throw new Error(data.error || 'Backend compilation failed.')
 
-        const dl = apiBase ? `${apiBase.replace(/\/$/, '')}${data.downloadUrl}` : data.downloadUrl
-        setDownloadUrl(dl)
-        setDownloadFilename(data.filename || finalFilename)
-        setStatus('done')
-        setLoading(false)
-
-        saveAndDeliverEpub(dl, data.filename || finalFilename).then((r) => {
-          if (r.message) setDownloadStatusMsg(r.message)
-        })
+        setJobId(data.jobId)
+        startSSE(data.jobId, apiBase)
       } catch (err) {
         console.error('[compileCustomToc] Backend error:', err)
         setError(err.message || 'Failed to compile via backend.')
@@ -415,6 +472,12 @@ export default function App() {
           })
 
           setStatus('building')
+          setProgress({
+            found: chapters.length,
+            processed: 0,
+            total: chapters.length,
+            message: 'Localizing images & building EPUB3...',
+          })
           const safeTitle = (title || 'Document').replace(/[^a-zA-Z0-9_\-\s]/g, '').trim().replace(/\s+/g, '-')
           const finalFilename = `${safeTitle}.epub`
 
@@ -422,6 +485,15 @@ export default function App() {
             title: title || fallbackTitle,
             author: author || 'KindleWebpageMaker',
             chapters,
+            onProgress: ({ status: s, processed, total, message }) => {
+              if (s) setStatus(s)
+              setProgress({
+                found: total,
+                processed,
+                total,
+                message: message || '',
+              })
+            },
           })
 
           const blobUrl = URL.createObjectURL(blob)
@@ -429,6 +501,12 @@ export default function App() {
           setDownloadUrl(blobUrl)
           setDownloadFilename(finalFilename)
           setStatus('done')
+          setProgress({
+            found: chapters.length,
+            processed: chapters.length,
+            total: chapters.length,
+            message: 'EPUB3 compilation complete!',
+          })
           setLoading(false)
 
           const deliverRes = await saveAndDeliverEpub(blob, finalFilename)
@@ -894,16 +972,30 @@ export default function App() {
                 )}
               </div>
 
-              {progress && status !== 'error' && (
+              {status !== 'error' && (
                 <div className="space-y-2">
-                  <ProgressBar value={progress.processed} max={progress.total || progress.found || 1} />
-                  <div className="flex justify-between text-xs text-slate-400">
-                    <span>
-                      {status === 'crawling'
-                        ? `Discovered ${progress.found} pages, crawled ${progress.processed}`
-                        : `Processing ${progress.processed} / ${progress.total || progress.found} pages`}
+                  <ProgressBar
+                    value={progress ? progress.processed : 0}
+                    max={progress ? (progress.total || progress.found || 1) : 1}
+                    loading={loading && status !== 'done'}
+                  />
+                  <div className="flex justify-between items-center text-xs text-slate-400 gap-2">
+                    <span className="truncate">
+                      {progress?.message || (
+                        status === 'crawling'
+                          ? `Discovered ${progress?.found || 1} pages, crawled ${progress?.processed || 0}`
+                          : status === 'extracting'
+                          ? `Extracting articles (${progress?.processed || 0}/${progress?.total || progress?.found || 1})`
+                          : status === 'building'
+                          ? `Compiling EPUB & localizing assets (${progress?.processed || 0}/${progress?.total || 1})`
+                          : status === 'done'
+                          ? 'Compilation complete'
+                          : `Processing…`
+                      )}
                     </span>
-                    <span>{progressPct}%</span>
+                    <span className="font-mono font-medium text-green-400 shrink-0">
+                      {status === 'done' ? '100%' : `${progressPct}%`}
+                    </span>
                   </div>
                 </div>
               )}
